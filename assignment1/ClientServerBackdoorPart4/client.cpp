@@ -82,7 +82,7 @@ int main(int argc, char* argv[]) {
         }
         ::close(fd);
 
-        // Optional: a separator for readability
+        // this part is just optional where we have a separator for readability
         if (accum.size() && accum.back() != '\n') std::cout << "\n";
     }
 
