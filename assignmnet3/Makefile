@@ -8,3 +8,5 @@ puzzlesolver: puzzlesolver.cpp
 
 clean:
 	rm -f scanner puzzlesolver
+
+	
