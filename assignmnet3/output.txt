@@ -1,0 +1,32 @@
+
+=== Port Identification Complete ===
+Secret Port: 4034
+Evil Port: 4022
+Checksum Port: 4080
+Knocking Port: 4008
+
+=== Solving Secret Port ===
+[DEBUG] solve_secret_port called for IP: 130.208.246.98, port: 4034
+[DEBUG] Generated secret number: 646982034
+Sending initial message (attempt 1)...
+Did not receive valid challenge response, retrying...
+Sending initial message (attempt 2)...
+[DEBUG] Received group ID: 34, challenge: 3096433199
+[DEBUG] Computed signature: 2652896189
+Sending signature reply (attempt 1)...
+[DEBUG] Received port response: Well done group 34. You have earned the right to know the port: 4096!
+Extracted hidden port: 4096
+SUCCESS: Secret port solved!
+Group ID: 34
+Signature: 2652896189
+Hidden Port: 4096
+
+=== Solving Evil Port with raw socket ===
+[DEBUG] solve_evil_port called for IP: 130.208.246.98, port: 4022
+[DEBUG] Receive socket bound to port: 54029
+[DEBUG] Sending evil packet with evil bit set...
+[DEBUG] Evil packet sent, waiting for response...
+Received response from evil port: Yes, strong in the dark side you are group 34 . Here is my secret port: 
+4010
+SUCCESS: Evil port solved!
+
