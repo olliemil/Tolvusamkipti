@@ -1,34 +1,14 @@
-#!/bin/sh
-set -e
+#!/bin/bash
 
-IP=130.208.246.98
-OUT="/tmp/tsam_ports.$$"
+# 1. Run the scanner and capture its output
+echo "Scanning for open ports on 130.208.246.98..."
+PORTS=$(./scanner1 130.208.246.98 4000 4100)
 
-: > "$OUT"
+# 2. Check if we got exactly 4 ports (or handle errors)
+# The 'scanner' program should ideally output *only* the numbers, e.g., "4023 4099 4007 4055"
+echo "Found open ports: $PORTS"
 
-tries=0
-count=0
+# 3. Pass the IP and the found ports to the puzzlesolver
+echo "Solving puzzles..."
+./puzzlesolver 130.208.246.98 $PORTS
 
-# Try up to 10 passes to beat UDP loss/rate-limit
-while [ "$count" -lt 4 ] && [ "$tries" -lt 10 ]; do
-  ./scanner "$IP" 4000 4100 | awk '/^Port [0-9]+ responded:/ {print $2}' >> "$OUT"
-  ports="$(sort -u "$OUT")"
-  set -- $ports
-  count=$#
-  tries=$((tries+1))
-  echo "Pass $tries: found $count -> $*"
-  sleep 0.3
-done
-
-if [ "$count" -ne 4 ]; then
-  echo "Expected 4 ports, got $count after $tries passes: $*" >&2
-  rm -f "$OUT"
-  exit 1
-fi
-
-echo "Using ports: $1 $2 $3 $4"
-# If your checksum handler uses raw sockets, you may need sudo:
-./puzzlesolver "$IP" "$1" "$2" "$3" "$4"
-# or: sudo ./puzzlesolver "$IP" "$1" "$2" "$3" "$4"
-
-rm -f "$OUT"

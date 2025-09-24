@@ -1,247 +1,667 @@
 #include <iostream>
-#include <string>
 #include <vector>
+#include <string>
 #include <cstring>
 #include <cstdlib>
-#include <cstdint>
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
-#include <errno.h>
+#include <random>
+#include <map>
+#include <netinet/ip.h>
+#include <netinet/udp.h>
+
+using namespace std;
+
+// ===== DATA STRUCTURES =====
+// struct PortInfo {
+//     int port;
+//     string type; // "secret", "evil", "checksum", "oracle"
+//     string response;
+// };
+
+// struct PuzzleData {
+//     uint8_t group_id;
+//     uint32_t signature;
+//     int hidden_port;
+//     map<string, string> secret_phrases; // port_type -> phrase
+// };
+
+// secret, evil bit, checksum, knock i einhverri roð?
 
 
-static const int TIMEOUT_MS = 1200;               // 1.2s per receive
-static const int RETRIES    = 3;                  // try a few times
-static const char* PROBE    = "Hello!!";          // ≥ 6 bytes
-static const std::int32_t SECRET_NUMBER = 7;      // your chosen number
-static const std::string  USERNAMES     = "sindrib23,benjaminr23,oliver23";
 
-enum PortType { PT_UNKNOWN, PT_SECRET, PT_SIGNATURE, PT_EVIL, PT_EXPS, PT_CHECKSUM };
+// Function declarations
+bool solve_secret_port(const string& ip, int port, uint8_t& group_id, uint32_t& signature, int& secret_hidden_port);
+string send_and_receive(int sock, const sockaddr_in& addr, const string& message, int timeout_sec = 2);
+int extract_port_from_response(const string& response);
+string identify_port_with_retry(const string& ip, int port, int max_retries = 3);
+bool probe_hidden_port(const string& ip, int port, uint32_t signature, uint8_t group_id);
+bool solve_evil_port_with_raw_socket(const string& ip, int port, uint32_t signature, uint8_t group_id, int& evil_hidden_port);
+bool solve_checksum_port(const string& ip, int port, uint32_t signature, int& checksum_hidden_port);
+bool knocking_port(const string& ip, int port, uint8_t group_id, int secret_hidden_port, int evil_hidden_port, int checksum_hidden_port);
 
-static int udp_send(const std::string& ip, int port, const void* data, size_t len) {
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { perror("socket"); return -1; }
-    sockaddr_in dst{}; dst.sin_family=AF_INET; dst.sin_port=htons(port);
-    inet_pton(AF_INET, ip.c_str(), &dst.sin_addr);
-    ssize_t n = sendto(s, data, len, 0, (sockaddr*)&dst, sizeof(dst));
-    if (n < 0) perror("sendto");
-    close(s);
-    return (n < 0) ? -1 : 0;
-}
+// ===== MAIN CONTROLLER =====
+// class PuzzleSolver {
+// private:
+//     string server_ip;
+//     map<string, PortInfo> ports;
+//     PuzzleData data;
+    
+// public:
+//     PuzzleSolver(const string& ip, const vector<int>& port_list) : server_ip(ip) {
+    
+//     }
 
-static bool udp_probe_recv(const std::string& ip, int port, std::string& out) {
-    out.clear();
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { perror("socket"); return false; }
-
-    // timeout
-    timeval tv{};
-    tv.tv_sec  = TIMEOUT_MS / 1000;
-    tv.tv_usec = (TIMEOUT_MS % 1000) * 1000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    // dest
-    sockaddr_in dst{}; dst.sin_family=AF_INET; dst.sin_port=htons(port);
-    inet_pton(AF_INET, ip.c_str(), &dst.sin_addr);
-
-    // send probe
-    (void)sendto(s, PROBE, strlen(PROBE), 0, (sockaddr*)&dst, sizeof(dst));
-
-    // receive (single try here; caller may retry)
-    char buf[4096];
-    sockaddr_in from{}; socklen_t flen=sizeof(from);
-    int n = recvfrom(s, buf, sizeof(buf)-1, 0, (sockaddr*)&from, &flen);
-    if (n > 0) {
-        buf[n] = '\0';
-        out.assign(buf, n);
-    }
-    close(s);
-    return n > 0;
-}
-
-static PortType classify(const std::string& text) {
-    std::string s = text;
-    // lower-ish check without allocating too much
-    for (char& c : s) c = (char)tolower((unsigned char)c);
-    if (s.find("s.e.c.r.e.t") != std::string::npos)           return PT_SECRET;
-    if (s.find("send me a 4-byte message") != std::string::npos ||
-        s.find("signature") != std::string::npos)             return PT_SIGNATURE;
-    if (s.find("e.x.p.s.t.n") != std::string::npos ||
-        s.find("knock") != std::string::npos)                 return PT_EXPS;
-    if (s.find("evil") != std::string::npos)                  return PT_EVIL;
-    if (s.find("checksum") != std::string::npos)              return PT_CHECKSUM;
-    return PT_UNKNOWN;
-}
-
-// --- SECRET handler: returns (ok, group_id, signature_host, signature_network) ---
-struct SecretResult { bool ok; uint8_t gid; uint32_t sig_host; uint32_t sig_net; };
-static SecretResult handle_secret(const std::string& ip, int port) {
-    SecretResult R{false, 0, 0, 0};
-
-    // one socket for the whole handshake
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { perror("socket"); return R; }
-
-    timeval tv{}; tv.tv_sec = TIMEOUT_MS/1000; tv.tv_usec = (TIMEOUT_MS%1000)*1000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    sockaddr_in dst{}; dst.sin_family=AF_INET; dst.sin_port=htons(port);
-    inet_pton(AF_INET, ip.c_str(), &dst.sin_addr);
-
-    // Build 'S' + 4 bytes secret (network order) + usernames
-    char msg[1024];
-    msg[0] = 'S';
-    uint32_t netSecret = htonl(SECRET_NUMBER);
-    memcpy(msg+1, &netSecret, 4);
-    std::memcpy(msg+5, USERNAMES.c_str(), USERNAMES.size());
-    int msglen = 5 + (int)USERNAMES.size();
-
-    if (sendto(s, msg, msglen, 0, (sockaddr*)&dst, sizeof(dst)) < 0) {
-        perror("sendto (secret init)"); close(s); return R;
-    }
-    std::cout << "[SECRET] Sent init to port " << port << " (len=" << msglen << ")\n";
-
-    // Expect exactly 5 bytes: [gid][challenge (4 bytes, net order)]
-    unsigned char buf[1024];
-    sockaddr_in from{}; socklen_t flen=sizeof(from);
-    int n = -1;
-    int tries = 0;
-    for (; tries < RETRIES; ++tries) {
-        n = recvfrom(s, buf, sizeof(buf), 0, (sockaddr*)&from, &flen);
-        if (n >= 0) break; // got data
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-            // timed out or interrupted — try again
-            continue;
-        }
-        // some other socket error — bail
-        break;
-    }
-    if (n != 5) {
-        perror("[SECRET] recv challenge");
-        close(s);
-        return R;
-    }
-    uint8_t gid = buf[0];
-    uint32_t challenge;
-    memcpy(&challenge, buf+1, 4);
-    challenge = ntohl(challenge);
-    std::cout << "[SECRET] GID=" << (int)gid << " challenge=" << challenge << "\n";
-
-    // signature = challenge XOR secretNumber
-    uint32_t signature = challenge ^ (uint32_t)SECRET_NUMBER;
-    uint32_t netSig    = htonl(signature);
-    char resp[5];
-    resp[0] = gid;
-    memcpy(resp+1, &netSig, 4);
-
-    if (sendto(s, resp, 5, 0, (sockaddr*)&dst, sizeof(dst)) < 0) {
-        perror("sendto (secret signature)"); close(s); return R;
-    }
-
-    // Final response should be text (e.g. secret port). We just print it.
-    n = -1; tries = 0;
-    for (; tries < RETRIES && n < 0; ++tries) {
-        n = recvfrom(s, buf, sizeof(buf)-1, 0, (sockaddr*)&from, &flen);
-    }
-    if (n > 0) {
-        buf[n] = '\0';
-        std::cout << "[SECRET] Final: " << buf << "\n";
-    } else {
-        perror("[SECRET] recv final");
-    }
-
-    close(s);
-    R.ok = true; R.gid = gid; R.sig_host = signature; R.sig_net = netSig;
-    return R;
-}
-
-static void handle_signature_port(const std::string& ip, int port, uint32_t netSignature) {
-    int s = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) { perror("socket"); return; }
-    timeval tv{}; tv.tv_sec = TIMEOUT_MS/1000; tv.tv_usec=(TIMEOUT_MS%1000)*1000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    sockaddr_in dst{}; dst.sin_family=AF_INET; dst.sin_port=htons(port);
-    inet_pton(AF_INET, ip.c_str(), &dst.sin_addr);
-    if (sendto(s, &netSignature, sizeof(netSignature), 0, (sockaddr*)&dst, sizeof(dst)) < 0) {
-        perror("sendto (signature port)"); close(s); return;
-    }
-    char buf[1024]; sockaddr_in from{}; socklen_t flen=sizeof(from);
-    int n = recvfrom(s, buf, sizeof(buf)-1, 0, (sockaddr*)&from, &flen);
-    if (n > 0) { buf[n]='\0'; std::cout << "[SIGNATURE] Reply: " << buf << "\n"; }
-    else perror("[SIGNATURE] recv");
-    close(s);
-}
-
-// Stubs for teammates:
-static void handle_evil_port(const std::string& ip, int port, uint8_t gid, uint32_t netSig) {
-    std::cout << "[EVIL] Port " << port << " (stub). Read instructions, transform data, send back.\n";
-}
-static void handle_exps_port(const std::string& ip, int port, uint8_t gid, uint32_t netSig) {
-    std::cout << "[EXPS] Port " << port << " (stub). Will use knocking later.\n";
-}
-static void handle_checksum_port(const std::string& ip, int port, uint8_t gid, uint32_t netSig) {
-    std::cout << "[CHECKSUM] Port " << port << " (stub). Use raw sockets + UDP checksum.\n";
-}
 
 int main(int argc, char* argv[]) {
+    // function to call
     if (argc != 6) {
-        std::cerr << "Usage: " << argv[0] << " <IP> <port1> <port2> <port3> <port4>\n";
+        cerr << "Usage: " << argv[0] << " <IP address> <port1> <port2> <port3> <port4>" << endl;
         return 1;
     }
-    std::string ip = argv[1];
-    int ports[4] = { std::atoi(argv[2]), std::atoi(argv[3]),
-                     std::atoi(argv[4]), std::atoi(argv[5]) };
-    for (int i=0;i<4;i++) {
-        if (ports[i] <= 0 || ports[i] > 65535) {
-            std::cerr << "Bad port: " << argv[2+i] << "\n"; return 1;
+
+    string ip = argv[1]; // second argument is the IP address
+    vector<int> ports;
+    for (int i = 2; i < 6; i++) {
+        ports.push_back(atoi(argv[i])); // convert to integer and store in ports vector
+    }
+
+    // Identify which port is which
+    int secret_port = -1, evil_port = -1, checksum_port = -1, knocking_port = -1;
+    for (int port : ports) {
+        string response = identify_port_with_retry(ip, port, 3);
+        
+        if (response.find("Greetings from S.E.C.R.E.T.") != string::npos) {
+            secret_port = port;
+            cout << "Found S.E.C.R.E.T. port: " << port << endl;
+        }
+        else if (response.find("The dark side") != string::npos) {
+            evil_port = port;
+            cout << "Found Evil port: " << port << endl;
+        }
+        else if (response.find("Send me a 4-byte message") != string::npos) {
+            checksum_port = port;
+            cout << "Found Checksum port: " << port << endl;
+        }
+        else if (response.find("Greetings! I am E.X.P.S.T.N") != string::npos) {
+            knocking_port = port;
+            cout << "Found E.X.P.S.T.N + knocking port: " << port << endl;
+        }
+        else if (!response.empty()) {
+            cout << "Unknown response from port " << port << ": " << response.substr(0, 100) << endl;
         }
     }
-    std::cout << "[puzzlesolver] IP=" << ip
-              << " ports=" << ports[0] << " " << ports[1]
-              << " " << ports[2] << " " << ports[3] << "\n";
 
-    // Probe & classify each
-    int port_secret=-1, port_signature=-1, port_evil=-1, port_exps=-1, port_checksum=-1;
-    for (int i=0;i<4;i++) {
-        std::string resp;
-        bool got = false;
-        for (int t=0; t<RETRIES && !got; ++t) got = udp_probe_recv(ip, ports[i], resp);
-        if (!got) continue;
-        std::cout << "[*] Port " << ports[i] << " says: " << resp << "\n";
-        switch (classify(resp)) {
-            case PT_SECRET:    port_secret    = ports[i]; break;
-            case PT_SIGNATURE: port_signature = ports[i]; break;
-            case PT_EVIL:      port_evil      = ports[i]; break;
-            case PT_EXPS:      port_exps      = ports[i]; break;
-            case PT_CHECKSUM:  port_checksum  = ports[i]; break;
-            default: break;
+    if (secret_port == -1) {
+        cerr << "Could not find S.E.C.R.E.T. port." << endl;
+        return 2;
+    }
+    else if (evil_port == -1) {
+        cerr << "Could not find Evil port." << endl;
+        return 3;
+    }
+    else if (checksum_port == -1) {
+        cerr << "Could not find Checksum port." << endl;
+        return 4;
+    }
+    else if (knocking_port == -1) {
+        cerr << "Could not find E.X.P.S.T.N + knocking port." << endl;
+        return 5;
+    }
+
+    cout << "\n=== Port Identification Complete ===" << endl;
+    cout << "Secret Port: " << secret_port << endl;
+    cout << "Evil Port: " << evil_port << endl;
+    cout << "Checksum Port: " << checksum_port << endl;
+    cout << "Knocking Port: " << knocking_port << endl;
+
+    // Setting up variables to hold puzzle data
+    uint8_t group_id;         // not set yet
+    uint32_t signature;       // not set yet
+    int secret_hidden_port;   // not set yet
+    int evil_hidden_port;     // not set yet
+    int checksum_hidden_port; // not set yet
+    
+    // Now solve the S.E.C.R.E.T. port first
+    if (secret_port > 0) {
+        cout << "\n=== Solving Secret Port ===" << endl;
+        if (solve_secret_port(ip, secret_port, group_id, signature, secret_hidden_port)) {
+            // Now group_id, signature, and hidden_port are set!
+            cout << "SUCCESS: Secret port solved!" << endl;
+            cout << "Group ID: " << (int)group_id << endl;
+            cout << "Signature: " << signature << endl;
+            cout << "Secret Hidden Port: " << secret_hidden_port << endl;
+        } else {
+            cerr << "FAILED: Could not solve secret port" << endl;
+            return 1;
         }
     }
 
-    if (port_secret < 0) { std::cerr << "Could not find S.E.C.R.E.T. port.\n"; return 1; }
-
-    // Do SECRET handshake → get signature
-    auto R = handle_secret(ip, port_secret);
-    if (!R.ok) { std::cerr << "SECRET handshake failed.\n"; return 1; }
-    std::cout << "[puzzlesolver] signature(host)=" << R.sig_host
-              << " signature(net)=0x" << std::hex << R.sig_net << std::dec
-              << " gid=" << (int)R.gid << "\n";
-
-    // Send signature to the signature port if found
-    if (port_signature >= 0) {
-        handle_signature_port(ip, port_signature, R.sig_net);
-    } else {
-        std::cout << "[puzzlesolver] No signature port detected this run.\n";
+    // Now solve the Evil port
+    if (evil_port > 0) {
+        cout << "\n=== Solving Evil Port with raw socket ===" << endl;
+        if (solve_evil_port_with_raw_socket(ip, evil_port, signature, group_id, evil_hidden_port)) {
+            cout << "SUCCESS: Evil port solved!" << endl;
+            cout << "Evil Hidden Port: " << evil_hidden_port << endl;
+        } else {
+            cerr << "FAILED: Could not solve evil port" << endl;
+            return 1;
+        }
     }
 
-    // Hand off to teammates’ parts (stubs):
-    if (port_evil      >= 0) handle_evil_port(ip, port_evil, R.gid, R.sig_net);
-    if (port_exps      >= 0) handle_exps_port(ip, port_exps, R.gid, R.sig_net);
-    if (port_checksum  >= 0) handle_checksum_port(ip, port_checksum, R.gid, R.sig_net);
+    // Now solve the Checksum port
+    if (checksum_port > 0) {
+        cout << "\n=== Solving Checksum Port ===" << endl;
+        if (solve_checksum_port(ip, checksum_port, signature, checksum_hidden_port)) {
+            cout << "SUCCESS: Checksum port solved!" << endl;
+            cout << "Checksum Hidden Port: " << checksum_hidden_port << endl;
+        } else {
+            cerr << "FAILED: Could not solve checksum port" << endl;
+            return 1;
+        }
+    }
+
+
+    // knocking_port(ip, knocking_port, group_id, signature);
 
     return 0;
+
+
+}
+
+// secret function
+// Function to solve the S.E.C.R.E.T. port puzzle (implementation to be added)
+bool solve_secret_port(const string& ip, int port, uint8_t& group_id, uint32_t& signature, int& secret_hidden_port) {
+    cout << "[DEBUG] solve_secret_port called for IP: " << ip << ", port: " << port << endl;
+    // 1. Generate a 32 bit secret number (and remember it for later)
+    // first gennerate a random 32 bit number
+    random_device rd;
+    mt19937 gen(rd());
+    uniform_int_distribution<uint32_t> dis(1, 0xFFFFFFFF);
+    uint32_t secret_number = dis(gen); // here is our secret number generated
+    cout << "[DEBUG] Generated secret number: " << secret_number << endl;
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0); // Create UDP socket
+    if (sock < 0) {
+        perror("socket creation failed");
+        return false;
+    }
+
+    // setting the timeout
+    timeval tv{};
+    tv.tv_sec = 2; // 2 seconds timeout
+    tv.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        perror("setsockopt failed");
+        close(sock);
+        return false;
+    }
+
+    // Here we set up the server address structure
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr);
+
+    // 2. Send me a message where the first byte is the letter 'S' followed by 4 bytes containing your secret number (in network byte order),
+    // and the rest of the message is a comma-separated list of the RU usernames of all your group members.
+    string usernames = "benjaminr23,sindrib23,oliver23";
+
+    bool step1_success = false;
+    for (int attempt = 0; attempt < 3 && !step1_success; attempt++) {
+        char message[1 + 4 + usernames.size()];
+        message[0] = 'S'; // first byte is 'S'
+        uint32_t net_secret = htonl(secret_number); // convert to network byte order
+        memcpy(message + 1, &net_secret, 4); // putting the secret number in next 4 bytes as network byte order
+        strcpy(message + 1 + 4, usernames.c_str()); // copy usernames after that
+
+        int message_len = 1 + 4 + usernames.size();
+
+        cout << "Sending initial message (attempt " << (attempt + 1) << ")..." << endl;
+        if (sendto(sock, message, message_len, 0, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Send failed");
+            continue; // try again
+        }
+
+        // 3. I will reply with a 5-byte message, where the first byte is your group ID and the remaining 4 bytes are a 32 bit challenge number (in network byte order)
+        char challenge_response_message[5]; // the 5 byte response message
+        sockaddr_in from_addr{};
+        socklen_t from_len = sizeof(from_addr); 
+
+        // Set timeout for receiving challenge
+        timeval tv{};
+        tv.tv_sec = 4;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+
+        int received = recvfrom(sock, challenge_response_message, 5, 0, (sockaddr*)&from_addr, &from_len);
+
+        if (received == 5) {
+            group_id = challenge_response_message[0];
+            uint32_t challenge;
+            memcpy(&challenge, challenge_response_message + 1, 4);
+            challenge = ntohl(challenge); // convert from network byte order to host byte order
+        
+            cout << "[DEBUG] Received group ID: " << (int)group_id << ", challenge: " << challenge << endl;
+            
+            // 4. Combine this challenge using the XOR operation with the secret number you generated in step 1 to obtain a 4 byte signature.
+            signature = challenge ^ secret_number;
+            cout << "[DEBUG] Computed signature: " << signature << endl;
+            step1_success = true; // we succeeded in step 1
+        }
+        else {
+            usleep(100000); // wait 100ms before retrying
+            cout << "Did not receive valid challenge response, retrying..." << endl;
+        }
+    }
+
+    if (!step1_success) {
+        cerr << "Failed to complete step 1 after 3 attempts." << endl;
+        close(sock);
+        return false;
+    }
+
+    // 5. Reply with a 5-byte message: the first byte is your group number, followed by the 4-byte signature (in network byte order).
+    bool step2_success = false;
+    for (int attempt = 0; attempt < 3 && !step2_success; attempt++) {
+        char reply_message[5];
+        reply_message[0] = group_id;
+        uint32_t net_signature = htonl(signature); // convert signature to network byte order
+        memcpy(reply_message + 1, &net_signature, 4); // copy signature into message
+
+        // send the reply message
+        cout << "Sending signature reply (attempt " << (attempt + 1) << ")..." << endl;
+        if (sendto(sock, reply_message, 5, 0, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+            perror("Send failed");
+            continue; // try again
+        }
+
+        // 6. If your signature is correct, I will respond with a secret port number. Good luck!
+        char port_response[1024];
+        sockaddr_in from_addr{};
+        socklen_t from_len = sizeof(from_addr);
+        
+        // Set timeout for receiving port
+        timeval tv{};
+        tv.tv_sec = 4;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        int received = recvfrom(sock, port_response, sizeof(port_response) - 1, 0, (sockaddr*)&from_addr, &from_len);
+        
+        if (received > 0) {
+            port_response[received] = '\0'; // null-terminate the response
+            string response_str(port_response);
+            cout << "[DEBUG] Received port response: " << response_str << endl;
+            
+            secret_hidden_port = extract_port_from_response(response_str);
+
+            if (secret_hidden_port > 0) {
+                cout << "Extracted hidden port: " << secret_hidden_port << endl;
+                step2_success = true; // we succeeded in step 2
+                break; // exit the retry loop
+            }
+            else {
+                cerr << "Could not extract hidden port from response, retrying" << endl;
+                usleep(100000); // wait 100ms before retrying
+            }
+        }
+        else {
+            usleep(100000); // wait 100ms before retrying
+            cout << "Did not receive valid port response, retrying..." << endl;
+        }
+    }
+    close(sock);
+    return step2_success;
+    // 7. Remember to keep your group ID and signature for later, you will need them for
+    // this was done with the reference variables passed in
+}
+
+int extract_port_from_response(const string& response) {
+    // Simple parsing to find the port number in the response string
+    for (size_t i = 0; i < response.size(); i++) {
+        if (isdigit(response[i])) {
+            size_t j = i;
+            while (j < response.length() && isdigit(response[j])) {
+                j++;
+            }
+            string number_str = response.substr(i, j - i);
+            int port = stoi(number_str);
+            
+            // Basic validation
+            if (port > 1024 && port < 65536) {
+                return port;
+            }
+        }
+    }
+    return -1; // could not find port
+}
+
+string send_and_receive(int sock, const sockaddr_in& addr, const string& message, int timeout_sec) {
+    timeval tv{};
+    tv.tv_sec = timeout_sec;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    sendto(sock, message.c_str(), message.length(), 0, (const sockaddr*)&addr, sizeof(addr));
+
+    char buffer[1024];
+    sockaddr_in from_addr{};
+    socklen_t from_len = sizeof(from_addr);
+    
+    int received = recvfrom(sock, buffer, sizeof(buffer) - 1, 0, (sockaddr*)&from_addr, &from_len);
+    
+    if (received > 0) {
+        buffer[received] = '\0';
+        return string(buffer);
+    }
+    return "";
+}
+
+string identify_port_with_retry(const string& ip, int port, int max_retries) {
+    for (int attempt = 1; attempt <= max_retries; ++attempt) {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0); // Create UDP socket
+        if (sock < 0) {
+            perror("socket creation failed");
+            continue;
+        }
+
+        // Setting up the sockaddr_in structure for the server
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+        // Set shorter timeout for identification
+        timeval tv{};
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        string response = send_and_receive(sock, addr, "Hello", 1);
+        close(sock);
+
+        if (!response.empty()) {
+            return response; // Successfully received a response
+        } else {
+            cout << "Attempt " << attempt << " failed for port " << port << ". Retrying..." << endl;
+        }
+        // Wait before retry
+        usleep(100000); // 100ms delay
+    }
+    return ""; // All attempts failed
+}
+
+bool solve_evil_port_with_raw_socket(const string& ip, int port, uint32_t signature, uint8_t group_id, int& evil_hidden_port) {
+    cout << "[DEBUG] solve_evil_port called for IP: " << ip << ", port: " << port << endl;
+    
+    // Create a normal UDP socket for receiving responses
+    int recv_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (recv_sock < 0) {
+        perror("Receive socket creation failed");
+        return false;
+    }
+
+    // Bind the socket to any local address and port 55555
+    sockaddr_in recv_addr{};
+    recv_addr.sin_family = AF_INET;
+    recv_addr.sin_addr.s_addr = INADDR_ANY;
+    recv_addr.sin_port = 0; // Let OS choose the port
+
+    // Here we bind the socket to the address
+    if (bind(recv_sock, (sockaddr*)&recv_addr, sizeof(recv_addr)) < 0) {
+        perror("Bind failed");
+        close(recv_sock);
+        return false;
+    }
+
+    // Get the port assigned by the OS
+    socklen_t addr_len = sizeof(recv_addr);
+    if (getsockname(recv_sock, (sockaddr*)&recv_addr, &addr_len) < 0) {
+        perror("getsockname failed");
+        close(recv_sock);
+        return false;
+    }
+    cout << "[DEBUG] Receive socket bound to port: " << ntohs(recv_addr.sin_port) << endl;
+
+    // Create the raw socket for sending evil packet
+    int raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
+    if (raw_sock < 0) {
+        perror("Raw socket creation failed");
+        close(recv_sock);
+        return false;
+    }
+
+    // Enable IP_HDRINCL to manually provide IP header
+    int one = 1;
+    if (setsockopt(raw_sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
+        perror("setsockopt IP_HDRINCL failed");
+        close(raw_sock);
+        close(recv_sock);
+        return false;
+    }
+
+    // Build the evil packet
+    char packet[1024];
+    memset(packet, 0, sizeof(packet));
+
+    // IP header
+    struct iphdr* ip_header = (struct iphdr*)packet;
+    ip_header->ihl = 5; // Header length (5 * 4 = 20 bytes)
+    ip_header->version = 4; // IPv4
+    ip_header->tos = 0; // Type of service: normal
+    ip_header->tot_len = htons(sizeof(struct iphdr) + sizeof(struct udphdr) + 4); // Total length (+ 4 because of the payload)
+    ip_header->id = htons(12345); // Identification: random
+    ip_header->frag_off = htons(0x8000); // Set the evil bit (highest bit of fragment offset)
+    ip_header->ttl = 64; // Time to live: 64 hops
+    ip_header->protocol = IPPROTO_UDP; // Protocol: UDP
+    ip_header->check = 0; // Checksum (0 for now, will calculate later)
+
+    // Source and destination IP addresses
+    ip_header->saddr = inet_addr("172.29.175.97");
+
+    // Destination IP address
+    ip_header->daddr = inet_addr(ip.c_str());
+
+    // UDP header
+    struct udphdr* udp_header = (struct udphdr*)(packet + sizeof(struct iphdr));
+    udp_header->source = recv_addr.sin_port; // Source port (the one we bound to)
+    udp_header->dest = htons(port); // Destination port
+    udp_header->len = htons(sizeof(struct udphdr) + 4); // Length of UDP header + payload
+    udp_header->check = 0; // Checksum (optional for UDP)
+
+    // Data (4-byte signature)
+    char* data = packet + sizeof(struct iphdr) + sizeof(struct udphdr);
+    uint32_t net_signature = htonl(signature);
+    memcpy(data, &net_signature, 4); // Copy signature into data (4 bytes and network byte order)
+
+    // Send the packet
+
+    // Destination address structure
+    sockaddr_in dest_addr{};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_addr.s_addr = inet_addr(ip.c_str());
+
+    cout << "[DEBUG] Sending evil packet with evil bit set..." << endl;
+
+    const int max_attempts = 3;
+    bool success = false;
+    for (int attempt = 0; attempt < max_attempts && !success; attempt++) {
+        ssize_t sent = sendto(raw_sock, packet, ntohs(ip_header->tot_len), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
+        
+        if (sent < 0) {
+            perror("send evil packet failed");
+            close(raw_sock);
+            close(recv_sock);
+            return false;
+        }
+
+        cout << "[DEBUG] Evil packet sent, waiting for response..." << endl;
+
+        // wait for response on the normal UDP socket
+        char response[1024];
+        sockaddr_in from_addr{};
+        socklen_t from_len = sizeof(from_addr);
+
+        timeval tv{};
+        tv.tv_sec = 4; // 4 seconds timeout
+        tv.tv_usec = 0;
+        setsockopt(recv_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        int received = recvfrom(recv_sock, response, sizeof(response) - 1, 0, (sockaddr*)&from_addr, &from_len);
+
+        if (received > 0) {
+            response[received] = '\0';
+            string response_str(response);
+            cout << "Received response from evil port: " << response_str << endl;
+
+            evil_hidden_port = extract_port_from_response(response_str);
+
+            if (evil_hidden_port > 0) {
+                cout << "Extracted hidden port: " << evil_hidden_port << endl;
+                success = true; // we succeeded
+                break; // exit the retry loop
+            } 
+            else {
+                cout << "Could not extract hidden port from response." << endl;
+                usleep(100000); // wait 100ms before retrying
+            }
+        } 
+        else {
+            usleep(100000); // wait 100ms before retrying
+            cout << "No response received from evil port, retrying..." << endl;
+        }
+    }
+    close(raw_sock);
+    close(recv_sock);
+    return success;
+}
+
+bool solve_checksum_port(const string& ip, int port, uint32_t signature, int& checksum_hidden_port) {
+    cout << "[DEBUG] solve_checksum_port called for IP: " << ip << ", port: " << port << endl;
+
+    // Create UDP socket
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket creation failed");
+        return false;
+    }
+
+    // Setting the timeout
+    timeval tv{};
+    tv.tv_sec = 2; // 2 seconds timeout
+    tv.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+        perror("setsockopt failed");
+        close(sock);
+        return false;
+    }
+
+    // Setting up the sockaddr_in structure for the server
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &server_addr.sin_addr);
+
+    bool success = false;
+    const int max_attempts = 3;
+    string response;
+    for (int attempt = 0; attempt < max_attempts && !success; attempt++) {
+        // Send me a 4-byte message containing the signature you got from S.E.C.R.E.T in the first 4 bytes (in network byte order).
+        uint32_t net_signature = htonl(signature);
+        cout << "Sending signature to checksum port (attempt " << attempt + 1 << ")" << endl;
+
+        string response = send_and_receive(sock, server_addr, string((char*)&net_signature, 4), 2);
+
+        if (!response.empty()) {
+            cout << "Received response from checksum port: " << response << endl;
+            success = true;
+            break; // exit the retry loop
+        } 
+        else {
+            usleep(100000); // wait 100ms before retrying
+            cout << "No response received from checksum port, retrying..." << endl;
+        }
+    }
+    
+    if (!success) {
+        cerr << "Failed to get response from checksum port after " << max_attempts << " attempts." << endl;
+        close(sock);
+        return false;
+    }
+    else {
+        cout << "Successfully communicated with checksum port." << endl;
+        // (Hint: all you need is a normal UDP socket which you use to send the IPv4 and UDP headers possibly with a payload) 
+        // (the last 6 bytes of this message contain the checksum and ip address in network byte order for your convenience)R�+j�y
+        if (response.size() < 6) {
+            cerr << "Response too short to extract checksum and IP." << endl;
+            close(sock);
+            return false;
+        }
+        else {
+            // Using the last 6 bytes to extract the checksum and IP address from the response without having to parse the string
+            const char* resp_data = response.data();
+            uint16_t checksum;
+            uint32_t ip_addr;
+            memcpy(&checksum, resp_data + response.size() - 6, 2);
+            memcpy(&ip_addr, resp_data + response.size() - 4, 4);
+            checksum = ntohs(checksum);
+            ip_addr = ntohl(ip_addr);
+
+            cout << "[DEBUG] Extracted checksum: 0x" << hex << checksum << dec << ", IP: " 
+                 << ((ip_addr >> 24) & 0xFF) << "." 
+                 << ((ip_addr >> 16) & 0xFF) << "." 
+                 << ((ip_addr >> 8) & 0xFF) << "." 
+                 << (ip_addr & 0xFF) << endl;
+            
+            // Now we need to construct the encapsulated UDP packet with the given checksum and source IP
+            // build the checksum packet
+            char packet[1024];
+            memset(packet, 0, sizeof(packet));
+
+            // UDP message where the payload is an encapsulated, valid UDP IPv4 packet,
+            // that has a valid UDP checksum of 0x52ba, and with the source address being 43.106.205.121! 
+
+            // IP header
+            struct iphdr* ip_header = (struct iphdr*)packet;
+
+            ip_header->version = 4; // IPv4
+            
+
+            // UDP header
+            struct udphdr* udp_header = (struct udphdr*)(packet + sizeof(struct iphdr));
+        }
+    }
 }
 
 
+bool probe_hidden_port(const string& ip, int port, uint32_t signature, uint8_t group_id) {
+    cout << "[DEBUG] probe_hidden_port called for IP: " << ip << ", port: " << port << endl;
+
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+    // Try sending just the signature first (as other ports expect)
+    uint32_t net_signature = htonl(signature);
+    string response = send_and_receive(sock, addr, string((char*)&net_signature, 4), 2);
+    
+    if (!response.empty()) {
+        cout << "Hidden port response: " << response << endl;
+    } else {
+        cout << "No response from hidden port (might need knocking)" << endl;
+    }
+    
+    close(sock);
+    return false;
+}

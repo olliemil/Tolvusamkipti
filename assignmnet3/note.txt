@@ -1,0 +1,11 @@
+ports with responses (puzzle ports):
+port 4066
+port 4077
+port 4088
+port 4099
+
+port 4015
+port 4036
+port 4057
+port 4078
+
