@@ -32,6 +32,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <sstream>
+#include <unordered_set>
 
 // ---------- Utilities ----------
 
@@ -59,6 +61,60 @@ struct Conn {
   std::string peer;               // "ip:port" for logs
 };
 
+// Whitespace trim (spaces/tabs/CR) – returns a trimmed copy
+static inline std::string trim(std::string s) {
+  size_t a = 0;
+  while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) ++a;
+  size_t b = s.size();
+  while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\r')) --b;
+  return s.substr(a, b - a);
+}
+
+// ---------- P2P (server-to-server) framing and peer state ----------
+
+namespace p2p {
+  static constexpr uint8_t SOH = 0x01, STX = 0x02, ETX = 0x03;
+
+  // Frame a payload as: SOH | len(16-bit NBO) | STX | payload | ETX
+  inline std::string frame(const std::string& payload) {
+    uint16_t total = 1 + 2 + 1 + payload.size() + 1;
+    uint16_t nbo = htons(total);
+    std::string out;
+    out.reserve(total);
+    out.push_back(char(SOH));
+    out.append(reinterpret_cast<const char*>(&nbo), 2);
+    out.push_back(char(STX));
+    out += payload;
+    out.push_back(char(ETX));
+    return out;
+  }
+
+  // Pop a single framed payload from byte stream; returns true and sets payload if a full frame is available.
+  inline bool pop(std::string& buf, std::string& payload) {
+    // resync to SOH
+    while (!buf.empty() && uint8_t(buf[0]) != SOH) buf.erase(buf.begin());
+    if (buf.size() < 4) return false;
+    uint16_t nbo;
+    memcpy(&nbo, buf.data()+1, 2);
+    uint16_t total = ntohs(nbo);
+    if (total < 5) { buf.erase(buf.begin()); return false; }
+    if (buf.size() < total) return false;
+    if (uint8_t(buf[3]) != STX || uint8_t(buf[total-1]) != ETX) { buf.erase(buf.begin()); return false; }
+    payload.assign(buf.data()+4, total-5);
+    buf.erase(0, total);
+    return true;
+  }
+}
+
+// A peer connection that uses framed server-to-server protocol.
+struct Peer {
+  int fd = -1;
+  std::string inbuf;              // raw framed bytes
+  std::deque<std::string> outq;  // framed buffers ready to send
+  std::string peer;               // ip:port string for logs
+  std::string name;               // learned group name from HELO (e.g., "A5 42")
+};
+
 int main(int argc, char* argv[]) {
   if (argc != 2) { std::cerr << "Usage: tsamgroup21 <port>\n"; return 1; }
   const char* MY_GROUP = "A5 21";
@@ -81,6 +137,13 @@ int main(int argc, char* argv[]) {
 
   // Active client connections indexed by fd
   std::unordered_map<int, Conn> conns;
+
+  // P2P peers (framed protocol) indexed by fd
+  std::unordered_map<int, Peer> peers;
+
+  // Public IP to disclose in SERVERS (change to TSAM IP when deployed)
+  std::string PUB_IP = "130.208.246.98";
+
   // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
   std::deque<std::string> inbox;
 
@@ -97,6 +160,12 @@ int main(int argc, char* argv[]) {
       short ev = POLLIN;
       if (!c.outq.empty()) ev |= POLLOUT;
       pfds.push_back({fd, ev, 0});
+    }
+    // Also monitor P2P peer sockets
+    for (auto& [pfd, p] : peers) {
+      short ev = POLLIN;
+      if (!p.outq.empty()) ev |= POLLOUT;
+      pfds.push_back({pfd, ev, 0});
     }
     int rc = poll(pfds.data(), pfds.size(), 1000); if (rc < 0) { perror("poll"); break; }
 
@@ -130,7 +199,20 @@ int main(int argc, char* argv[]) {
         while (true) {
           ssize_t n = recv(fd, buf, sizeof(buf), 0);
           if (n > 0) {
-            c.inbuf.append(buf, buf + n);
+            // If we don't yet have any buffered data and the first new byte looks like SOH,
+            // this is a framed P2P connection: promote this socket from Conn -> Peer.
+            if (c.inbuf.empty() && uint8_t(buf[0]) == p2p::SOH) {
+              Peer p;
+              p.fd   = fd;
+              p.peer = c.peer;
+              p.inbuf.assign(buf, buf + n);
+              peers.emplace(fd, std::move(p));
+              std::cout << now() << " PROMOTE " << c.peer << " fd=" << fd << " to P2P\n";
+              conns.erase(it);
+              goto next_fd; // will be handled in the peers section
+            } else {
+              c.inbuf.append(buf, buf + n);
+            }
           } else if (n == 0) {
             std::cout << now() << " CLOSE " << c.peer << " fd=" << fd << "\n";
             close(fd); conns.erase(it); goto next_fd;
@@ -155,8 +237,8 @@ int main(int argc, char* argv[]) {
 
           if (line == "LISTSERVERS") {
             // Early-bonus demo: advertise only this node.
-            // NOTE: uses 127.0.0.1 for local testing; replace with the public TSAM IP when required by spec.
-            enqueue(c, std::string("SERVERS,") + MY_GROUP + ",127.0.0.1," + std::to_string(port));
+            // NOTE: uses PUB_IP for local testing; replace with the public TSAM IP when required by spec.
+            enqueue(c, std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port));
 
           } else if (line.rfind("SENDMSG,", 0) == 0) {
             // SENDMSG,<GROUPID>,<text>
@@ -227,6 +309,94 @@ int main(int argc, char* argv[]) {
         }
       }
       next_fd: continue;
+    }
+
+    // ---------- Handle P2P peers (framed protocol) ----------
+    // We iterate a snapshot of current peer fds to avoid iterator invalidation on erase.
+    {
+      std::vector<int> pfds_peers;
+      pfds_peers.reserve(peers.size());
+      for (auto& kv : peers) pfds_peers.push_back(kv.first);
+
+      for (int pfd : pfds_peers) {
+        // Find this pfd's poll entry
+        size_t pidx = 0;
+        bool found = false;
+        for (size_t k = 0; k < pfds.size(); ++k) { if (pfds[k].fd == pfd) { pidx = k; found = true; break; } }
+        if (!found) continue;
+
+        auto pit = peers.find(pfd);
+        if (pit == peers.end()) continue;
+        Peer& p = pit->second;
+
+        // Read
+        if (pfds[pidx].revents & (POLLIN | POLLERR | POLLHUP)) {
+          char buf[4096];
+          while (true) {
+            ssize_t n = recv(pfd, buf, sizeof(buf), 0);
+            if (n > 0) {
+              p.inbuf.append(buf, buf + n);
+            } else if (n == 0) {
+              std::cout << now() << " PEER-CLOSE " << p.peer << " fd=" << pfd << "\n";
+              close(pfd); peers.erase(pit); goto next_peer;
+            } else {
+              if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+              perror("peer recv"); close(pfd); peers.erase(pit); goto next_peer;
+            }
+          }
+
+          // Parse all complete frames
+          std::string payload;
+          while (p2p::pop(p.inbuf, payload)) {
+            std::cout << now() << " P2P-RX " << p.peer << " \"" << payload << "\"\n";
+
+            // Handle HELO: reply SERVERS with our public reachability
+            if (payload.rfind("HELO,", 0) == 0) {
+              p.name = payload.substr(5); // remember their group name
+              std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
+              p.outq.push_back(p2p::frame(resp));
+            }
+            // Handle SENDMSG,<TO>,<FROM>,<Message...>
+            else if (payload.rfind("SENDMSG,", 0) == 0) {
+              size_t c1 = payload.find(',', 8);
+              size_t c2 = (c1 == std::string::npos) ? std::string::npos : payload.find(',', c1 + 1);
+              if (c1 != std::string::npos && c2 != std::string::npos) {
+                std::string to = trim(payload.substr(8, c1 - 8));
+                std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
+                std::string body = payload.substr(c2 + 1);
+                if (to == MY_GROUP) {
+                  inbox.push_back(body);
+                  std::cout << now() << " MSG-ENQUEUE from [" << from << "] -> [" << to << "]: " << body << "\n";
+                }
+              }
+              // No explicit ACK required by spec for SENDMSG
+            }
+            // Optionally ignore KEEPALIVE, GETMSGS, STATUSREQ here for this step
+          }
+        }
+
+        // Write any pending framed data
+        if (pfds[pidx].revents & POLLOUT) {
+          while (!p.outq.empty()) {
+            const std::string& b = p.outq.front();
+            ssize_t n = send(pfd, b.data(), b.size(), 0);
+            if (n < 0) {
+              if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+              perror("peer send"); close(pfd); peers.erase(pit); goto next_peer;
+            }
+            if ((size_t)n < b.size()) {
+              p.outq.front() = b.substr(n); break;
+            } else {
+              // Pretty log: peel payload for display
+              std::string tmp = b, pl;
+              if (p2p::pop(tmp, pl)) std::cout << now() << " P2P-TX " << p.peer << " \"" << pl << "\"\n";
+              else std::cout << now() << " P2P-TX " << p.peer << " (" << b.size() << " bytes)\n";
+              p.outq.pop_front();
+            }
+          }
+        }
+        next_peer: ;
+      }
     }
   }
   // (unreachable in this simple loop) — on program exit, OS will close descriptors
