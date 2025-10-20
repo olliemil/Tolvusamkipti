@@ -41,21 +41,21 @@
 static std::string now() {
   using namespace std::chrono;
   auto t = system_clock::to_time_t(system_clock::now());
-  char buf[32];
-  strftime(buf, sizeof(buf), "%F %T", std::localtime(&t));
-  return buf;
+  char timestampBuffer[32];
+  strftime(timestampBuffer, sizeof(timestampBuffer), "%F %T", std::localtime(&t));
+  return timestampBuffer;
 }
 
 // Put a socket/file descriptor into non-blocking mode (so recv/accept/send never block the event loop)
-static int set_nonblock(int fd) {
-  int fl = fcntl(fd, F_GETFL, 0);
+static int set_nonblock(int socketFileDescriptor) {
+  int fl = fcntl(socketFileDescriptor, F_GETFL, 0);
   if (fl < 0) return -1;
-  return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+  return fcntl(socketFileDescriptor, F_SETFL, fl | O_NONBLOCK);
 }
 
 // Per-connection state for client sockets
 struct Conn {
-  int fd;                         // socket fd
+  int socketFileDescriptor;       // socket fd
   std::string inbuf;              // bytes accumulated from recv() until newline
   std::deque<std::string> outq;   // lines pending to send (each ends with '\n')
   std::string peer;               // "ip:port" for logs
@@ -90,25 +90,25 @@ namespace p2p {
   }
 
   // Pop a single framed payload from byte stream; returns true and sets payload if a full frame is available.
-  inline bool pop(std::string& buf, std::string& payload) {
+  inline bool pop(std::string& frameBuffer, std::string& payload) {
     // resync to SOH
-    while (!buf.empty() && uint8_t(buf[0]) != SOH) buf.erase(buf.begin());
-    if (buf.size() < 4) return false;
+    while (!frameBuffer.empty() && uint8_t(frameBuffer[0]) != SOH) frameBuffer.erase(frameBuffer.begin());
+    if (frameBuffer.size() < 4) return false;
     uint16_t nbo;
-    memcpy(&nbo, buf.data()+1, 2);
+    memcpy(&nbo, frameBuffer.data()+1, 2);
     uint16_t total = ntohs(nbo);
-    if (total < 5) { buf.erase(buf.begin()); return false; }
-    if (buf.size() < total) return false;
-    if (uint8_t(buf[3]) != STX || uint8_t(buf[total-1]) != ETX) { buf.erase(buf.begin()); return false; }
-    payload.assign(buf.data()+4, total-5);
-    buf.erase(0, total);
+    if (total < 5) { frameBuffer.erase(frameBuffer.begin()); return false; }
+    if (frameBuffer.size() < total) return false;
+    if (uint8_t(frameBuffer[3]) != STX || uint8_t(frameBuffer[total-1]) != ETX) { frameBuffer.erase(frameBuffer.begin()); return false; }
+    payload.assign(frameBuffer.data()+4, total-5);
+    frameBuffer.erase(0, total);
     return true;
   }
 }
 
 // A peer connection that uses framed server-to-server protocol.
 struct Peer {
-  int fd = -1;
+  int socketFileDescriptor = -1;
   std::string inbuf;              // raw framed bytes
   std::deque<std::string> outq;  // framed buffers ready to send
   std::string peer;               // ip:port string for logs
@@ -125,14 +125,14 @@ int main(int argc, char* argv[]) {
   // Group label used by SENDMSG matching and LISTSERVERS reply
 
   // ---------- Create and prepare listening socket ----------
-  int ls = socket(AF_INET, SOCK_STREAM, 0);
-  if (ls < 0) { perror("socket"); return 1; }
-  int on = 1; setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-  if (set_nonblock(ls) < 0) { perror("fcntl"); return 1; }
+  int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+  if (listenSocket < 0) { perror("socket"); return 1; }
+  int socketOption = 1; setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &socketOption, sizeof(socketOption));
+  if (set_nonblock(listenSocket) < 0) { perror("fcntl"); return 1; }
 
   sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
-  if (bind(ls, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
-  if (listen(ls, 16) < 0) { perror("listen"); return 1; }
+  if (bind(listenSocket, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
+  if (listen(listenSocket, 16) < 0) { perror("listen"); return 1; }
   std::cout << now() << " SERVER listening on port " << port << "\n";
 
   // Active client connections indexed by fd
@@ -148,120 +148,120 @@ int main(int argc, char* argv[]) {
   std::deque<std::string> inbox;
 
   // Queue a line for sending (appends '\n' so the client receives one line per reply)
-  auto enqueue = [&](Conn& c, const std::string& line) {
-    c.outq.push_back(line + "\n");
+  auto enqueue = [&](Conn& connection, const std::string& line) {
+    connection.outq.push_back(line + "\n");
   };
 
   // ---------- Event loop ----------
   while (true) {
     // Build pollfd list: index 0 = listener, then one entry per active client.
-    std::vector<pollfd> pfds; pfds.push_back({ls, POLLIN, 0});
-    for (auto& [fd, c] : conns) {
+    std::vector<pollfd> pfds; pfds.push_back({listenSocket, POLLIN, 0});
+    for (auto& [socketFileDescriptor, c] : conns) {
       short ev = POLLIN;
       if (!c.outq.empty()) ev |= POLLOUT;
-      pfds.push_back({fd, ev, 0});
+      pfds.push_back({socketFileDescriptor, ev, 0});
     }
     // Also monitor P2P peer sockets
-    for (auto& [pfd, p] : peers) {
+    for (auto& [peerSocketFileDescriptor, p] : peers) {
       short ev = POLLIN;
       if (!p.outq.empty()) ev |= POLLOUT;
-      pfds.push_back({pfd, ev, 0});
+      pfds.push_back({peerSocketFileDescriptor, ev, 0});
     }
     int rc = poll(pfds.data(), pfds.size(), 1000); if (rc < 0) { perror("poll"); break; }
 
     // New inbound connections ready?
     if (pfds[0].revents & POLLIN) {
-      sockaddr_in cli{}; socklen_t cl = sizeof(cli);
+      sockaddr_in cli{}; socklen_t clientAddressLength = sizeof(cli);
       // Accept all pending connections (drain the accept queue)
       while (true) {
-        int fd = accept(ls, (sockaddr*)&cli, &cl);
-        if (fd < 0) {
+        int clientSocketFileDescriptor = accept(listenSocket, (sockaddr*)&cli, &clientAddressLength);
+        if (clientSocketFileDescriptor < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) break;
           perror("accept"); break;
         }
-        set_nonblock(fd);
+        set_nonblock(clientSocketFileDescriptor);
         char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &cli.sin_addr, ip, sizeof(ip));
         int cport = ntohs(cli.sin_port);
-        Conn c{fd, {}, {}, std::string(ip) + ":" + std::to_string(cport)};
-        conns.emplace(fd, std::move(c));
-        std::cout << now() << " ACCEPT " << ip << ":" << cport << " fd=" << fd << "\n";
+        Conn c{clientSocketFileDescriptor, {}, {}, std::string(ip) + ":" + std::to_string(cport)};
+        conns.emplace(clientSocketFileDescriptor, std::move(c));
+        std::cout << now() << " ACCEPT " << ip << ":" << cport << " fd=" << clientSocketFileDescriptor << "\n";
       }
     }
 
     // Handle readable/writable client sockets
     for (size_t i = 1; i < pfds.size(); ++i) {
-      int fd = pfds[i].fd;
-      auto it = conns.find(fd); if (it == conns.end()) continue;
-      Conn& c = it->second;
+      int socketFileDescriptor = pfds[i].fd;
+      auto connectionIterator = conns.find(socketFileDescriptor); if (connectionIterator == conns.end()) continue;
+      Conn& connection = connectionIterator->second;
 
       if (pfds[i].revents & (POLLIN | POLLERR | POLLHUP)) {
-        char buf[4096];
+        char networkBuffer[4096];
         while (true) {
-          ssize_t n = recv(fd, buf, sizeof(buf), 0);
-          if (n > 0) {
+          ssize_t bytesReceived = recv(socketFileDescriptor, networkBuffer, sizeof(networkBuffer), 0);
+          if (bytesReceived > 0) {
             // If we don't yet have any buffered data and the first new byte looks like SOH,
             // this is a framed P2P connection: promote this socket from Conn -> Peer.
-            if (c.inbuf.empty() && uint8_t(buf[0]) == p2p::SOH) {
+            if (connection.inbuf.empty() && uint8_t(networkBuffer[0]) == p2p::SOH) {
               Peer p;
-              p.fd   = fd;
-              p.peer = c.peer;
-              p.inbuf.assign(buf, buf + n);
-              peers.emplace(fd, std::move(p));
-              std::cout << now() << " PROMOTE " << c.peer << " fd=" << fd << " to P2P\n";
-              conns.erase(it);
+              p.socketFileDescriptor   = socketFileDescriptor;
+              p.peer = connection.peer;
+              p.inbuf.assign(networkBuffer, networkBuffer + bytesReceived);
+              peers.emplace(socketFileDescriptor, std::move(p));
+              std::cout << now() << " PROMOTE " << connection.peer << " fd=" << socketFileDescriptor << " to P2P\n";
+              conns.erase(connectionIterator);
               goto next_fd; // will be handled in the peers section
             } else {
-              c.inbuf.append(buf, buf + n);
+              connection.inbuf.append(networkBuffer, networkBuffer + bytesReceived);
             }
-          } else if (n == 0) {
-            std::cout << now() << " CLOSE " << c.peer << " fd=" << fd << "\n";
-            close(fd); conns.erase(it); goto next_fd;
+          } else if (bytesReceived == 0) {
+            std::cout << now() << " CLOSE " << connection.peer << " fd=" << socketFileDescriptor << "\n";
+            close(socketFileDescriptor); conns.erase(connectionIterator); goto next_fd;
           } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            perror("recv"); close(fd); conns.erase(it); goto next_fd;
+            perror("recv"); close(socketFileDescriptor); conns.erase(connectionIterator); goto next_fd;
           }
         }
 
         // Guard against unbounded input growth (protects server memory)
-        if (c.inbuf.size() > MAX_INBUF) {
-          std::cerr << now() << " WARN closing " << c.peer << " due to oversized input buffer (" << c.inbuf.size() << " bytes)\n";
-          close(fd); conns.erase(it); goto next_fd;
+        if (connection.inbuf.size() > MAX_INBUF) {
+          std::cerr << now() << " WARN closing " << connection.peer << " due to oversized input buffer (" << connection.inbuf.size() << " bytes)\n";
+          close(socketFileDescriptor); conns.erase(connectionIterator); goto next_fd;
         }
 
         // Extract complete lines (LF-terminated; strip CR if present)
-        size_t pos;
-        while ((pos = c.inbuf.find('\n')) != std::string::npos) {
-          std::string line = c.inbuf.substr(0, pos); c.inbuf.erase(0, pos + 1);
+        size_t newlinePosition;
+        while ((newlinePosition = connection.inbuf.find('\n')) != std::string::npos) {
+          std::string line = connection.inbuf.substr(0, newlinePosition); connection.inbuf.erase(0, newlinePosition + 1);
           if (!line.empty() && line.back() == '\r') line.pop_back();
-          std::cout << now() << " RX " << c.peer << " \"" << line << "\"\n";
+          std::cout << now() << " RX " << connection.peer << " \"" << line << "\"\n";
 
           if (line == "LISTSERVERS") {
             // Early-bonus demo: advertise only this node.
             // NOTE: uses PUB_IP for local testing; replace with the public TSAM IP when required by spec.
-            enqueue(c, std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port));
+            enqueue(connection, std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port));
 
           } else if (line.rfind("SENDMSG,", 0) == 0) {
             // SENDMSG,<GROUPID>,<text>
             // Parse two commas after "SENDMSG," then normalize fields (trim spaces/CR and surrounding quotes)
-            size_t p1 = line.find(',', 7);
-            if (p1 != std::string::npos) {
-              size_t p2 = line.find(',', p1 + 1);
-              if (p2 != std::string::npos) {
-                std::string to   = line.substr(p1 + 1, p2 - (p1 + 1));
-                std::string text = line.substr(p2 + 1);
+            size_t firstCommaPos = line.find(',', 7);
+            if (firstCommaPos != std::string::npos) {
+              size_t secondCommaPos = line.find(',', firstCommaPos + 1);
+              if (secondCommaPos != std::string::npos) {
+                std::string to   = line.substr(firstCommaPos + 1, secondCommaPos - (firstCommaPos + 1));
+                std::string text = line.substr(secondCommaPos + 1);
 
-                auto normalize = [](std::string& s){
+                auto normalize = [](std::string& stringToNormalize){
                   // trim left
-                  size_t a = 0; while (a < s.size() && (s[a]==' '||s[a]=='\t'||s[a]=='\r')) ++a;
+                  size_t a = 0; while (a < stringToNormalize.size() && (stringToNormalize[a]==' '||stringToNormalize[a]=='\t'||stringToNormalize[a]=='\r')) ++a;
                   // trim right
-                  size_t b = s.size(); while (b > a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r')) --b;
-                  s = s.substr(a, b - a);
+                  size_t b = stringToNormalize.size(); while (b > a && (stringToNormalize[b-1]==' '||stringToNormalize[b-1]=='\t'||stringToNormalize[b-1]=='\r')) --b;
+                  stringToNormalize = stringToNormalize.substr(a, b - a);
                   // strip matching surrounding quotes (repeat to tolerate doubled quotes)
-                  while (s.size() >= 2 && s.front()=='"' && s.back()=='"') {
-                    s = s.substr(1, s.size()-2);
+                  while (stringToNormalize.size() >= 2 && stringToNormalize.front()=='"' && stringToNormalize.back()=='"') {
+                    stringToNormalize = stringToNormalize.substr(1, stringToNormalize.size()-2);
                   }
                   // drop a stray trailing quote if present
-                  if (!s.empty() && s.back()=='"') s.pop_back();
+                  if (!stringToNormalize.empty() && stringToNormalize.back()=='"') stringToNormalize.pop_back();
                 };
                 normalize(to);
                 normalize(text);
@@ -272,39 +272,39 @@ int main(int argc, char* argv[]) {
                 if (to == MY_GROUP) {
                   inbox.push_back(text);
                 }
-                enqueue(c, "OK");
+                enqueue(connection, "OK");
               } else {
-                enqueue(c, "ERR,BADFORMAT");
+                enqueue(connection, "ERR,BADFORMAT");
               }
             } else {
-              enqueue(c, "ERR,BADFORMAT");
+              enqueue(connection, "ERR,BADFORMAT");
             }
 
           } else if (line == "GETMSG") {
-            if (!inbox.empty()) { std::string msg = inbox.front(); inbox.pop_front(); enqueue(c, std::string("MSG,") + msg); }
-            else enqueue(c, "EMPTY");
+            if (!inbox.empty()) { std::string msg = inbox.front(); inbox.pop_front(); enqueue(connection, std::string("MSG,") + msg); }
+            else enqueue(connection, "EMPTY");
 
           } else {
-            enqueue(c, "ERR,UNKNOWN");
+            enqueue(connection, "ERR,UNKNOWN");
           }
         }
       }
 
       // Writable: flush as much of the out queue as the kernel will take (handles partial writes)
       if (pfds[i].revents & POLLOUT) {
-        while (!c.outq.empty()) {
-          const std::string& front = c.outq.front();
-          ssize_t n = send(fd, front.data(), front.size(), 0);
-          if (n < 0) {
+        while (!connection.outq.empty()) {
+          const std::string& front = connection.outq.front();
+          ssize_t bytesSent = send(socketFileDescriptor, front.data(), front.size(), 0);
+          if (bytesSent < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            perror("send"); close(fd); conns.erase(it); goto next_fd;
+            perror("send"); close(socketFileDescriptor); conns.erase(connectionIterator); goto next_fd;
           }
           // Kernel accepted only part of the buffer; keep the remainder in-place for next POLLOUT
-          if ((size_t)n < front.size()) { c.outq.front() = front.substr(n); break; }
+          if ((size_t)bytesSent < front.size()) { connection.outq.front() = front.substr(bytesSent); break; }
           else {
             std::string log = front; if (!log.empty() && log.back() == '\n') log.pop_back();
-            std::cout << now() << " TX " << c.peer << " \"" << log << "\"\n";
-            c.outq.pop_front();
+            std::cout << now() << " TX " << connection.peer << " \"" << log << "\"\n";
+            connection.outq.pop_front();
           }
         }
       }
@@ -318,52 +318,52 @@ int main(int argc, char* argv[]) {
       pfds_peers.reserve(peers.size());
       for (auto& kv : peers) pfds_peers.push_back(kv.first);
 
-      for (int pfd : pfds_peers) {
+      for (int peerSocketFileDescriptor : pfds_peers) {
         // Find this pfd's poll entry
         size_t pidx = 0;
         bool found = false;
-        for (size_t k = 0; k < pfds.size(); ++k) { if (pfds[k].fd == pfd) { pidx = k; found = true; break; } }
+        for (size_t k = 0; k < pfds.size(); ++k) { if (pfds[k].fd == peerSocketFileDescriptor) { pidx = k; found = true; break; } }
         if (!found) continue;
 
-        auto pit = peers.find(pfd);
-        if (pit == peers.end()) continue;
-        Peer& p = pit->second;
+        auto peerIterator = peers.find(peerSocketFileDescriptor);
+        if (peerIterator == peers.end()) continue;
+        Peer& peer = peerIterator->second;
 
         // Read
         if (pfds[pidx].revents & (POLLIN | POLLERR | POLLHUP)) {
-          char buf[4096];
+          char peerNetworkBuffer[4096];
           while (true) {
-            ssize_t n = recv(pfd, buf, sizeof(buf), 0);
-            if (n > 0) {
-              p.inbuf.append(buf, buf + n);
-            } else if (n == 0) {
-              std::cout << now() << " PEER-CLOSE " << p.peer << " fd=" << pfd << "\n";
-              close(pfd); peers.erase(pit); goto next_peer;
+            ssize_t bytesReceived = recv(peerSocketFileDescriptor, peerNetworkBuffer, sizeof(peerNetworkBuffer), 0);
+            if (bytesReceived > 0) {
+              peer.inbuf.append(peerNetworkBuffer, peerNetworkBuffer + bytesReceived);
+            } else if (bytesReceived == 0) {
+              std::cout << now() << " PEER-CLOSE " << peer.peer << " fd=" << peerSocketFileDescriptor << "\n";
+              close(peerSocketFileDescriptor); peers.erase(peerIterator); goto next_peer;
             } else {
               if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-              perror("peer recv"); close(pfd); peers.erase(pit); goto next_peer;
+              perror("peer recv"); close(peerSocketFileDescriptor); peers.erase(peerIterator); goto next_peer;
             }
           }
 
           // Parse all complete frames
           std::string payload;
-          while (p2p::pop(p.inbuf, payload)) {
-            std::cout << now() << " P2P-RX " << p.peer << " \"" << payload << "\"\n";
+          while (p2p::pop(peer.inbuf, payload)) {
+            std::cout << now() << " P2P-RX " << peer.peer << " \"" << payload << "\"\n";
 
             // Handle HELO: reply SERVERS with our public reachability
             if (payload.rfind("HELO,", 0) == 0) {
-              p.name = payload.substr(5); // remember their group name
+              peer.name = payload.substr(5); // remember their group name
               std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
-              p.outq.push_back(p2p::frame(resp));
+              peer.outq.push_back(p2p::frame(resp));
             }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
             else if (payload.rfind("SENDMSG,", 0) == 0) {
-              size_t c1 = payload.find(',', 8);
-              size_t c2 = (c1 == std::string::npos) ? std::string::npos : payload.find(',', c1 + 1);
-              if (c1 != std::string::npos && c2 != std::string::npos) {
-                std::string to = trim(payload.substr(8, c1 - 8));
-                std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
-                std::string body = payload.substr(c2 + 1);
+              size_t firstCommaPos = payload.find(',', 8);
+              size_t secondCommaPos = (firstCommaPos == std::string::npos) ? std::string::npos : payload.find(',', firstCommaPos + 1);
+              if (firstCommaPos != std::string::npos && secondCommaPos != std::string::npos) {
+                std::string to = trim(payload.substr(8, firstCommaPos - 8));
+                std::string from = trim(payload.substr(firstCommaPos + 1, secondCommaPos - (firstCommaPos + 1)));
+                std::string body = payload.substr(secondCommaPos + 1);
                 if (to == MY_GROUP) {
                   inbox.push_back(body);
                   std::cout << now() << " MSG-ENQUEUE from [" << from << "] -> [" << to << "]: " << body << "\n";
@@ -377,21 +377,21 @@ int main(int argc, char* argv[]) {
 
         // Write any pending framed data
         if (pfds[pidx].revents & POLLOUT) {
-          while (!p.outq.empty()) {
-            const std::string& b = p.outq.front();
-            ssize_t n = send(pfd, b.data(), b.size(), 0);
-            if (n < 0) {
+          while (!peer.outq.empty()) {
+            const std::string& frameBuffer = peer.outq.front();
+            ssize_t bytesSent = send(peerSocketFileDescriptor, frameBuffer.data(), frameBuffer.size(), 0);
+            if (bytesSent < 0) {
               if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-              perror("peer send"); close(pfd); peers.erase(pit); goto next_peer;
+              perror("peer send"); close(peerSocketFileDescriptor); peers.erase(peerIterator); goto next_peer;
             }
-            if ((size_t)n < b.size()) {
-              p.outq.front() = b.substr(n); break;
+            if ((size_t)bytesSent < frameBuffer.size()) {
+              peer.outq.front() = frameBuffer.substr(bytesSent); break;
             } else {
               // Pretty log: peel payload for display
-              std::string tmp = b, pl;
-              if (p2p::pop(tmp, pl)) std::cout << now() << " P2P-TX " << p.peer << " \"" << pl << "\"\n";
-              else std::cout << now() << " P2P-TX " << p.peer << " (" << b.size() << " bytes)\n";
-              p.outq.pop_front();
+              std::string tmp = frameBuffer, pl;
+              if (p2p::pop(tmp, pl)) std::cout << now() << " P2P-TX " << peer.peer << " \"" << pl << "\"\n";
+              else std::cout << now() << " P2P-TX " << peer.peer << " (" << frameBuffer.size() << " bytes)\n";
+              peer.outq.pop_front();
             }
           }
         }
