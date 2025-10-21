@@ -116,9 +116,13 @@ struct Peer {
 };
 
 int main(int argc, char* argv[]) {
-  if (argc != 2) { std::cerr << "Usage: tsamgroup21 <port>\n"; return 1; }
-  const char* MY_GROUP = "A5 21";
+  if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
+  const char* MY_GROUP = "A5_21";
   int port = std::atoi(argv[1]);
+  // Optional seed peer (e.g., instructor server) to proactively connect to.
+  const char* seed_host = nullptr;
+  int seed_port = 0;
+  if (argc == 4) { seed_host = argv[2]; seed_port = std::atoi(argv[3]); }
 
   // Safety limit: drop connections that try to buffer excessively (basic DoS guard)
   const size_t MAX_INBUF = 64 * 1024; // 64 KiB
@@ -141,8 +145,29 @@ int main(int argc, char* argv[]) {
   // P2P peers (framed protocol) indexed by fd
   std::unordered_map<int, Peer> peers;
 
+  // Helper to connect to a peer and queue HELO
+  auto connect_peer = [&](const std::string& host, int rport) -> int {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { perror("socket(connect_peer)"); return -1; }
+    // We can do blocking connect; set non-block afterwards to keep event loop simple.
+    sockaddr_in r{}; r.sin_family = AF_INET; r.sin_port = htons(rport);
+    if (inet_pton(AF_INET, host.c_str(), &r.sin_addr) != 1) { std::cerr << "Bad seed host: " << host << "\n"; close(fd); return -1; }
+    if (connect(fd, (sockaddr*)&r, sizeof(r)) < 0) { perror("connect(seed)"); close(fd); return -1; }
+    set_nonblock(fd);
+    char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &r.sin_addr, ip, sizeof(ip));
+    Peer p; p.fd = fd; p.peer = std::string(ip) + ":" + std::to_string(rport);
+    // Proactively identify ourselves
+    p.outq.push_back(p2p::frame(std::string("HELO,") + MY_GROUP));
+    peers.emplace(fd, std::move(p));
+    std::cout << now() << " OUTBOUND " << host << ":" << rport << " fd=" << fd << " (HELLO queued)\n";
+    return fd;
+  };
+
   // Public IP to disclose in SERVERS (change to TSAM IP when deployed)
   std::string PUB_IP = "130.208.246.98";
+  using clock = std::chrono::steady_clock;
+  auto last_ka = clock::now();
+  bool toggle_statusreq = true; // alternate STATUSREQ to reduce noise
 
   // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
   std::deque<std::string> inbox;
@@ -153,7 +178,13 @@ int main(int argc, char* argv[]) {
   };
 
   // ---------- Event loop ----------
+  static bool seeded = false;
   while (true) {
+    // One-time outbound connect to seed peer, if provided
+    if (!seeded && seed_host && seed_port > 0) {
+      connect_peer(seed_host, seed_port);
+      seeded = true;
+    }
     // Build pollfd list: index 0 = listener, then one entry per active client.
     std::vector<pollfd> pfds; pfds.push_back({ls, POLLIN, 0});
     for (auto& [fd, c] : conns) {
@@ -168,6 +199,20 @@ int main(int argc, char* argv[]) {
       pfds.push_back({pfd, ev, 0});
     }
     int rc = poll(pfds.data(), pfds.size(), 1000); if (rc < 0) { perror("poll"); break; }
+
+    // Periodic P2P housekeeping: KEEPALIVE + occasional STATUSREQ
+    if (clock::now() - last_ka >= std::chrono::seconds(60)) {
+      for (auto& kv : peers) {
+        Peer& p = kv.second;
+        // We don't track per-peer pending counts yet; send 0 which is valid by spec
+        p.outq.push_back(p2p::frame("KEEPALIVE,0"));
+        if (toggle_statusreq) {
+          p.outq.push_back(p2p::frame("STATUSREQ"));
+        }
+      }
+      toggle_statusreq = !toggle_statusreq;
+      last_ka = clock::now();
+    }
 
     // New inbound connections ready?
     if (pfds[0].revents & POLLIN) {
@@ -371,7 +416,28 @@ int main(int argc, char* argv[]) {
               }
               // No explicit ACK required by spec for SENDMSG
             }
-            // Optionally ignore KEEPALIVE, GETMSGS, STATUSREQ here for this step
+            else if (payload == "STATUSREQ") {
+              // We currently only hold messages for ourselves in `inbox`, but responding is enough for sheet metrics.
+              std::string resp = "STATUSRESP";
+              p.outq.push_back(p2p::frame(resp));
+            }
+            else if (payload.rfind("KEEPALIVE,", 0) == 0) {
+              // Optionally react: if peer says they have messages for us (>0), ask for them.
+              // Format: KEEPALIVE,<num>
+              size_t comma = payload.find(',');
+              int n = 0;
+              if (comma != std::string::npos) {
+                try { n = std::stoi(payload.substr(comma+1)); } catch(...) { n = 0; }
+              }
+              if (n > 0) {
+                // Request pending messages for our group
+                p.outq.push_back(p2p::frame(std::string("GETMSGS,") + MY_GROUP));
+              }
+            }
+            else if (payload.rfind("GETMSGS,", 0) == 0) {
+              // Minimal implementation: another server is asking us to deliver messages we hold for THEM.
+              // This simple server does not queue per-remote yet, so reply with nothing (silently ignore).
+            }
           }
         }
 
