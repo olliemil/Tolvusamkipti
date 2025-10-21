@@ -34,6 +34,7 @@
 #include <vector>
 #include <sstream>
 #include <unordered_set>
+#include <tuple>
 
 // ---------- Utilities ----------
 
@@ -144,9 +145,26 @@ int main(int argc, char* argv[]) {
 
   // P2P peers (framed protocol) indexed by fd
   std::unordered_map<int, Peer> peers;
+  // Deduplication & rate-limit for outbound peer connections
+  static const size_t MAX_PEERS = 12;
+  std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_attempt;
+  static const std::chrono::seconds CONNECT_BACKOFF(30);
 
   // Helper to connect to a peer and queue HELO
   auto connect_peer = [&](const std::string& host, int rport) -> int {
+    // Connection fan-out guard & dedup
+    if (peers.size() >= MAX_PEERS) return -1;
+    std::string key = host + ":" + std::to_string(rport);
+    auto now_tp = std::chrono::steady_clock::now();
+    auto itla = last_attempt.find(key);
+    if (itla != last_attempt.end() && now_tp - itla->second < CONNECT_BACKOFF) {
+      return -1; // too soon to try again
+    }
+    if (known_endpoints.count(key)) {
+      // already connected/attempted recently
+      return -1;
+    }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { perror("socket(connect_peer)"); return -1; }
     // We can do blocking connect; set non-block afterwards to keep event loop simple.
@@ -154,6 +172,8 @@ int main(int argc, char* argv[]) {
     if (inet_pton(AF_INET, host.c_str(), &r.sin_addr) != 1) { std::cerr << "Bad seed host: " << host << "\n"; close(fd); return -1; }
     if (connect(fd, (sockaddr*)&r, sizeof(r)) < 0) { perror("connect(seed)"); close(fd); return -1; }
     set_nonblock(fd);
+    known_endpoints.insert(key);
+    last_attempt[key] = now_tp;
     char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &r.sin_addr, ip, sizeof(ip));
     Peer p; p.fd = fd; p.peer = std::string(ip) + ":" + std::to_string(rport);
     // Proactively identify ourselves
@@ -171,6 +191,8 @@ int main(int argc, char* argv[]) {
 
   // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
   std::deque<std::string> inbox;
+  // Messages we hold for other groups: key = TO group, value = deque of (FROM, BODY)
+  std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold;
 
   // Queue a line for sending (appends '\n' so the client receives one line per reply)
   auto enqueue = [&](Conn& c, const std::string& line) {
@@ -373,6 +395,7 @@ int main(int argc, char* argv[]) {
         auto pit = peers.find(pfd);
         if (pit == peers.end()) continue;
         Peer& p = pit->second;
+        std::string payload;
 
         // Read
         if (pfds[pidx].revents & (POLLIN | POLLERR | POLLHUP)) {
@@ -391,7 +414,6 @@ int main(int argc, char* argv[]) {
           }
 
           // Parse all complete frames
-          std::string payload;
           while (p2p::pop(p.inbuf, payload)) {
             std::cout << now() << " P2P-RX " << p.peer << " \"" << payload << "\"\n";
 
@@ -401,28 +423,89 @@ int main(int argc, char* argv[]) {
               std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
               p.outq.push_back(p2p::frame(resp));
             }
+            // Auto-connect to peers advertised by others
+            else if (payload.rfind("SERVERS,", 0) == 0) {
+              // payload: SERVERS,Name,IP,Port;Name,IP,Port;...
+              std::string list = payload.substr(8);
+              std::stringstream ss(list);
+              std::string entry;
+              int connected = 0;
+
+              auto is_ip = [](const std::string& s){
+                in_addr tmp{};
+                return inet_pton(AF_INET, s.c_str(), &tmp) == 1;
+              };
+
+              while (std::getline(ss, entry, ';')) {
+                if (entry.empty()) continue;
+
+                // Tokenize robustly (some peers send weird orders/extra commas)
+                std::vector<std::string> tok;
+                std::stringstream es(entry);
+                std::string t;
+                while (std::getline(es, t, ',')) if (!t.empty()) tok.push_back(t);
+
+                if (tok.size() < 3) continue;
+
+                std::string name = tok[0];
+                std::string ip   = tok[1];
+                std::string portstr = tok[2];
+
+                // Heuristic: if tok[1] is not an IP but tok[2] is, swap (seen in the wild)
+                if (!is_ip(ip) && is_ip(portstr)) {
+                  std::swap(ip, portstr);
+                }
+
+                // Validate IP
+                if (!is_ip(ip)) continue;
+
+                int prt = -1;
+                try { prt = std::stoi(portstr); } catch (...) { prt = -1; }
+
+                // Validate port range (avoid -1, ephemeral junk, and privileged ports)
+                if (prt < 1024 || prt > 65535) continue;
+
+                // Skip ourselves
+                if (name == MY_GROUP) continue;
+
+                // Dedup/limit: do not fan out uncontrollably
+                std::string key = ip + ":" + std::to_string(prt);
+                if (known_endpoints.count(key)) continue;
+                if (connected >= 3) break; // keep it modest
+
+                int nfd = connect_peer(ip, prt);
+                if (nfd >= 0) ++connected;
+              }
+            }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
             else if (payload.rfind("SENDMSG,", 0) == 0) {
               size_t c1 = payload.find(',', 8);
               size_t c2 = (c1 == std::string::npos) ? std::string::npos : payload.find(',', c1 + 1);
               if (c1 != std::string::npos && c2 != std::string::npos) {
-                std::string to = trim(payload.substr(8, c1 - 8));
+                std::string to   = trim(payload.substr(8, c1 - 8));
                 std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
                 std::string body = payload.substr(c2 + 1);
                 if (to == MY_GROUP) {
                   inbox.push_back(body);
                   std::cout << now() << " MSG-ENQUEUE from [" << from << "] -> [" << to << "]: " << body << "\n";
+                } else {
+                  // Hold for other groups until they ask via GETMSGS,<GROUP>
+                  hold[to].push_back({from, body});
+                  std::cout << now() << " RELAY-HOLD for [" << to << "] from [" << from << "]\n";
                 }
               }
-              // No explicit ACK required by spec for SENDMSG
+              // no ACK required by spec
             }
             else if (payload == "STATUSREQ") {
-              // We currently only hold messages for ourselves in `inbox`, but responding is enough for sheet metrics.
+              // Report what we are holding for others
               std::string resp = "STATUSRESP";
+              for (auto& kv : hold) {
+                resp += "," + kv.first + "," + std::to_string(kv.second.size());
+              }
               p.outq.push_back(p2p::frame(resp));
             }
             else if (payload.rfind("KEEPALIVE,", 0) == 0) {
-              // Optionally react: if peer says they have messages for us (>0), ask for them.
+              // If peer says they have messages for us (>0), ask for them.
               // Format: KEEPALIVE,<num>
               size_t comma = payload.find(',');
               int n = 0;
@@ -435,10 +518,21 @@ int main(int argc, char* argv[]) {
               }
             }
             else if (payload.rfind("GETMSGS,", 0) == 0) {
-              // Minimal implementation: another server is asking us to deliver messages we hold for THEM.
-              // This simple server does not queue per-remote yet, so reply with nothing (silently ignore).
+              // Peer is asking us to deliver messages we hold for them
+              std::string who = trim(payload.substr(8));
+              auto it = hold.find(who);
+              int sent = 0;
+              if (it != hold.end()) {
+                while (!it->second.empty() && sent < 20) { // be nice; cap per tick
+                  auto [from, body] = it->second.front();
+                  it->second.pop_front();
+                  std::string msg = "SENDMSG," + who + "," + from + "," + body;
+                  p.outq.push_back(p2p::frame(msg));
+                  ++sent;
+                }
+                if (it->second.empty()) hold.erase(it);
+              }
             }
-          }
         }
 
         // Write any pending framed data
@@ -466,4 +560,5 @@ int main(int argc, char* argv[]) {
     }
   }
   // (unreachable in this simple loop) — on program exit, OS will close descriptors
-}
+          } // end while (p2p::pop)
+        } // end if (POLLIN | POLLERR | POLLHUP)
