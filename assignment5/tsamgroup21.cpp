@@ -226,14 +226,23 @@ int main(int argc, char* argv[]) {
     if (clock::now() - last_ka >= std::chrono::seconds(60)) {
       for (auto& kv : peers) {
         Peer& p = kv.second;
-        // We don't track per-peer pending counts yet; send 0 which is valid by spec
-        p.outq.push_back(p2p::frame("KEEPALIVE,0"));
-        if (toggle_statusreq) {
-          p.outq.push_back(p2p::frame("STATUSREQ"));
+        int pending_for_them = 0;
+        if (!p.name.empty()) {
+          auto it = hold.find(p.name);
+          if (it != hold.end()) pending_for_them = (int)it->second.size();
         }
+        p.outq.push_back(p2p::frame("KEEPALIVE," + std::to_string(pending_for_them)));
+        if (toggle_statusreq) p.outq.push_back(p2p::frame("STATUSREQ"));
       }
       toggle_statusreq = !toggle_statusreq;
       last_ka = clock::now();
+    }
+
+    // If we somehow have too few peers, nudge by asking existing peers again
+    if (peers.size() < 3) {
+      for (auto& kv : peers) {
+        kv.second.outq.push_back(p2p::frame("STATUSREQ"));
+      }
     }
 
     // New inbound connections ready?

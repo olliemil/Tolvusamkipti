@@ -2,7 +2,7 @@
 // Usage:
 //   ./client <group-id> <message>
 // Example:
-//   ./client "A5 29" "Weekend grind with the boys!"
+//   ./client "A5_29" "Weekend grind with the boys!"
 //
 // Optional full form for manual commands:
 //   ./client <ip> <port> <command> [args...]
