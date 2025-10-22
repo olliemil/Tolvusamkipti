@@ -522,10 +522,61 @@ int main(int argc, char* argv[]) {
             }
             // Auto-connect to peers advertised by others
             else if (payload.rfind("SERVERS,", 0) == 0) {
-              // TEMPORARILY DISABLED: Stop auto-connecting to prevent P2P connection explosion
-              // This was causing exponential peer connections that overwhelmed the server
-              // preventing it from accepting client connections
-              std::cout << now() << " DEBUG: SERVERS received but auto-connect disabled to fix client connectivity\n";
+              // CONTROLLED AUTO-CONNECT: Very conservative to prevent connection explosion
+              // Only connect if we have very few peers and with strict limits
+              if (peers.size() < 3 && peers.size() < 8){
+                // payload: SERVERS,Name,IP,Port;Name,IP,Port;...
+                std::string list = payload.substr(8);
+                std::stringstream ss(list);
+                std::string entry;
+                int connected = 0;
+                int max_new_connections = 1; // Only 1 new connection per SERVERS message
+
+                auto is_ip = [](const std::string& s){
+                  in_addr tmp{};
+                  return inet_pton(AF_INET, s.c_str(), &tmp) == 1;
+                };
+
+                while (std::getline(ss, entry, ';') && connected < max_new_connections) {
+                  if (entry.empty()) continue;
+
+                  // Tokenize robustly
+                  std::vector<std::string> tok;
+                  std::stringstream es(entry);
+                  std::string t;
+                  while (std::getline(es, t, ',')) if (!t.empty()) tok.push_back(t);
+
+                  if (tok.size() < 3) continue;
+
+                  std::string name = tok[0];
+                  std::string ip   = tok[1];
+                  std::string portstr = tok[2];
+
+                  // Validate IP
+                  if (!is_ip(ip)) continue;
+
+                  int prt = -1;
+                  try { prt = std::stoi(portstr); } catch (...) { prt = -1; }
+
+                  // Validate port range
+                  if (prt < 1024 || prt > 65535) continue;
+
+                  // Skip ourselves
+                  if (name == MY_GROUP) continue;
+
+                  // Dedup/limit
+                  std::string key = ip + ":" + std::to_string(prt);
+                  if (known_endpoints.count(key)) continue;
+
+                  int nfd = connect_peer(ip, prt);
+                  if (nfd >= 0) {
+                    ++connected;
+                    std::cout << now() << " CONTROLLED-AUTO-CONNECT to " << name << " (" << peers.size() << "/3 peers)\n";
+                  }
+                }
+              } else {
+                std::cout << now() << " DEBUG: SERVERS received but we have enough peers (" << peers.size() << "/3)\n";
+              }
             }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
             else if (payload.rfind("SENDMSG,", 0) == 0) {
