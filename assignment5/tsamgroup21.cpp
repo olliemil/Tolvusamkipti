@@ -116,14 +116,22 @@ struct Peer {
   std::string name;               // learned group name from HELO (e.g., "A5 42")
 };
 
+int serverSendMsg(const std::string& to_group, const std::string& from_group, const std::string& text) {
+  // this function will be used when we receive a SENDMSG with the format SENDMSG,<TO_GROUP>,<FROM_GROUP>,<text>
+  // we will have to take in the message and the group as an input parameter
+  // we will have to check if we have any peers connected to the target group, we will do that by iterating through the peers map
+  //Send message to another group. The message content may be arbitrary data, but the whole command should not exceed 5000 bytes
+  return 0; // return 0 on success, -1 on failure
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
   const char* MY_GROUP = "A5_21";
   int port = std::atoi(argv[1]);
   // Optional seed peer (e.g., instructor server) to proactively connect to.
-  const char* seed_host = nullptr;
-  int seed_port = 0;
-  if (argc == 4) { seed_host = argv[2]; seed_port = std::atoi(argv[3]); }
+  const char* seed_host = nullptr; // there is no seed host by default
+  int seed_port = 0; // no seed port by default
+  if (argc == 4) { seed_host = argv[2]; seed_port = std::atoi(argv[3]); } // 
 
   // Safety limit: drop connections that try to buffer excessively (basic DoS guard)
   const size_t MAX_INBUF = 64 * 1024; // 64 KiB
@@ -147,18 +155,21 @@ int main(int argc, char* argv[]) {
   std::unordered_map<int, Peer> peers;
   // Deduplication & rate-limit for outbound peer connections
   static const size_t MAX_PEERS = 12;
-  std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently
-  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_attempt;
-  static const std::chrono::seconds CONNECT_BACKOFF(30);
+  std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently, we keep it in a set to avoid duplicates
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_attempt; // last connect attempt time
+  static const std::chrono::seconds CONNECT_BACKOFF(30); // min time between connect attempts to same endpoint
 
   // Helper to connect to a peer and queue HELO
-  auto connect_peer = [&](const std::string& host, int rport) -> int {
+  auto connect_peer = [&](const std::string& host, int rport) -> int { // this is a lambda function to connect to a peer
     // Connection fan-out guard & dedup
-    if (peers.size() >= MAX_PEERS) return -1;
-    std::string key = host + ":" + std::to_string(rport);
-    auto now_tp = std::chrono::steady_clock::now();
-    auto itla = last_attempt.find(key);
-    if (itla != last_attempt.end() && now_tp - itla->second < CONNECT_BACKOFF) {
+    if (peers.size() >= MAX_PEERS) {
+      perror("connect_peer: max peers reached");
+      return -1;
+    }
+    std::string key = host + ":" + std::to_string(rport); // unique key for this endpoint like e.g. 192.168.1.1:12345
+    auto now_tp = std::chrono::steady_clock::now(); // current time point
+    auto itla = last_attempt.find(key); // find last attempt time
+    if (itla != last_attempt.end() && now_tp - itla->second < CONNECT_BACKOFF) { 
       return -1; // too soon to try again
     }
     if (known_endpoints.count(key)) {
@@ -168,17 +179,19 @@ int main(int argc, char* argv[]) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { perror("socket(connect_peer)"); return -1; }
     // We can do blocking connect; set non-block afterwards to keep event loop simple.
-    sockaddr_in r{}; r.sin_family = AF_INET; r.sin_port = htons(rport);
+    sockaddr_in r{}; r.sin_family = AF_INET; r.sin_port = htons(rport); // the r is for remote
     if (inet_pton(AF_INET, host.c_str(), &r.sin_addr) != 1) { std::cerr << "Bad seed host: " << host << "\n"; close(fd); return -1; }
     if (connect(fd, (sockaddr*)&r, sizeof(r)) < 0) { perror("connect(seed)"); close(fd); return -1; }
     set_nonblock(fd);
-    known_endpoints.insert(key);
-    last_attempt[key] = now_tp;
+    known_endpoints.insert(key); // the connection succeeded (we add it to known endpoints)
+    last_attempt[key] = now_tp; // record last attempt time for this endpoint
     char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &r.sin_addr, ip, sizeof(ip));
-    Peer p; p.fd = fd; p.peer = std::string(ip) + ":" + std::to_string(rport);
+
+    Peer p; p.fd = fd; p.peer = std::string(ip) + ":" + std::to_string(rport); // p is for a new instance of Peer
     // Proactively identify ourselves
     p.outq.push_back(p2p::frame(std::string("HELO,") + MY_GROUP));
-    peers.emplace(fd, std::move(p));
+    // when we connect to a peer, we queue a HELO message to introduce ourselves
+    peers.emplace(fd, std::move(p)); 
     std::cout << now() << " OUTBOUND " << host << ":" << rport << " fd=" << fd << " (HELLO queued)\n";
     return fd;
   };
@@ -192,7 +205,7 @@ int main(int argc, char* argv[]) {
   // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
   std::deque<std::string> inbox;
   // Messages we hold for other groups: key = TO group, value = deque of (FROM, BODY)
-  std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold;
+  std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold; // this is to hold messages for other groups
 
   // Queue a line for sending (appends '\n' so the client receives one line per reply)
   auto enqueue = [&](Conn& c, const std::string& line) {
@@ -203,6 +216,7 @@ int main(int argc, char* argv[]) {
   static bool seeded = false;
   while (true) {
     // One-time outbound connect to seed peer, if provided
+    // to seed the peer means we connect to a known server to get the ball rolling
     if (!seeded && seed_host && seed_port > 0) {
       connect_peer(seed_host, seed_port);
       seeded = true;
@@ -265,6 +279,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Handle readable/writable client sockets
+    // pfds is the list of pollfd structures we built earlier
     for (size_t i = 1; i < pfds.size(); ++i) {
       int fd = pfds[i].fd;
       auto it = conns.find(fd); if (it == conns.end()) continue;
@@ -319,12 +334,45 @@ int main(int argc, char* argv[]) {
           } else if (line.rfind("SENDMSG,", 0) == 0) {
             // SENDMSG,<GROUPID>,<text>
             // Parse two commas after "SENDMSG," then normalize fields (trim spaces/CR and surrounding quotes)
-            size_t p1 = line.find(',', 7);
+            size_t p1 = line.find(',', 7); // p1 is the position of the first comma after SENDMSG, we will use that to find the <groupid>
             if (p1 != std::string::npos) {
               size_t p2 = line.find(',', p1 + 1);
               if (p2 != std::string::npos) {
                 std::string to   = line.substr(p1 + 1, p2 - (p1 + 1));
                 std::string text = line.substr(p2 + 1);
+                size_t p3 = line.find(',', p2 + 1);
+
+
+                // THIS IS WHAT I ADDED TO HANDLE THE 3-PARAMETER FORMAT
+                if (p3 != std::string::npos) {
+                  // Extended format: SENDMSG,<TO_GROUP>,<FROM_GROUP>,<text>
+                  std::string from = line.substr(p2 + 1, p3 - (p2 + 1));
+                  text = line.substr(p3 + 1);
+                  if (to == MY_GROUP) {
+                    inbox.push_back(text);
+                    enqueue(c, "OK");
+                    continue;
+                  }
+                  // Send to other group if we have a peer connection
+                  bool sent = false;
+                  for (auto& kv : peers) {
+                    Peer& p = kv.second;
+                    if (p.name == to) {
+                      std::string payload = std::string("SENDMSG,") + to + "," + from + "," + text;
+                      p.outq.push_back(p2p::frame(payload));
+                      sent = true;
+                    }
+                  }
+                  if (sent) {
+                    enqueue(c, "OK");
+                  } else {
+                    // Hold for later delivery
+                    hold[to].emplace_back(from, text);
+                    enqueue(c, "OK");
+                  }
+                  continue;
+                }
+                // END OF WHAT I ADDED
 
                 auto normalize = [](std::string& s){
                   // trim left
@@ -542,7 +590,8 @@ int main(int argc, char* argv[]) {
                 if (it->second.empty()) hold.erase(it);
               }
             }
-        }
+          } // end while (p2p::pop)
+        } // end if (POLLIN | POLLERR | POLLHUP)
 
         // Write any pending framed data
         if (pfds[pidx].revents & POLLOUT) {
@@ -569,5 +618,4 @@ int main(int argc, char* argv[]) {
     }
   }
   // (unreachable in this simple loop) — on program exit, OS will close descriptors
-          } // end while (p2p::pop)
-        } // end if (POLLIN | POLLERR | POLLHUP)
+}
