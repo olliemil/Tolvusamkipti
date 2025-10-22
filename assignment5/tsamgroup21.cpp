@@ -283,10 +283,13 @@ int main(int argc, char* argv[]) {
     }
 
     // If we somehow have too few peers, nudge by asking existing peers again
-    if (peers.size() < 3) {
+    // FIXED: Only do this occasionally, not every loop iteration
+    static auto last_peer_nudge = clock::now();
+    if (peers.size() < 3 && clock::now() - last_peer_nudge >= std::chrono::seconds(30)) {
       for (auto& kv : peers) {
         kv.second.outq.push_back(p2p::frame("STATUSREQ"));
       }
+      last_peer_nudge = clock::now();
     }
 
     // New inbound connections ready?
@@ -385,31 +388,6 @@ int main(int argc, char* argv[]) {
               if (p2 != std::string::npos) {
                 std::string to   = line.substr(p1 + 1, p2 - (p1 + 1));
                 std::string text = line.substr(p2 + 1);
-                size_t p3 = line.find(',', p2 + 1);
-
-
-                // THIS IS WHAT I ADDED TO HANDLE THE 3-PARAMETER FORMAT
-                if (p3 != std::string::npos) {
-                  // Extended format: SENDMSG,<TO_GROUP>,<FROM_GROUP>,<text>
-                  std::string from = line.substr(p2 + 1, p3 - (p2 + 1));
-                  text = line.substr(p3 + 1);
-                  if (to == MY_GROUP) {
-                    inbox.push_back(text);
-                    enqueue(c, "OK");
-                    continue;
-                  }
-                  // Forward to ALL connected peers (they will route to destination)
-                  for (auto& kv : peers) {
-                    Peer& p = kv.second;
-                    if (!p.name.empty()) { // Only send to identified peers
-                      std::string payload = std::string("SENDMSG,") + to + "," + from + "," + text;
-                      p.outq.push_back(p2p::frame(payload));
-                    }
-                  }
-                  enqueue(c, "OK");
-                  continue;
-                }
-                // END OF WHAT I ADDED
 
                 auto normalize = [](std::string& s){
                   // trim left
@@ -432,6 +410,13 @@ int main(int argc, char* argv[]) {
 
                 if (to == MY_GROUP) {
                   inbox.push_back(text);
+                } else {
+                  // Forward message to P2P network for other groups
+                  std::string p2p_msg = "SENDMSG," + to + "," + MY_GROUP + "," + text;
+                  for (auto& kv : peers) {
+                    kv.second.outq.push_back(p2p::frame(p2p_msg));
+                  }
+                  std::cout << now() << " P2P-FORWARD to [" << to << "] from [" << MY_GROUP << "]: " << text << "\n";
                 }
                 enqueue(c, "OK");
               } else {
@@ -537,57 +522,10 @@ int main(int argc, char* argv[]) {
             }
             // Auto-connect to peers advertised by others
             else if (payload.rfind("SERVERS,", 0) == 0) {
-              // payload: SERVERS,Name,IP,Port;Name,IP,Port;...
-              std::string list = payload.substr(8);
-              std::stringstream ss(list);
-              std::string entry;
-              int connected = 0;
-
-              auto is_ip = [](const std::string& s){
-                in_addr tmp{};
-                return inet_pton(AF_INET, s.c_str(), &tmp) == 1;
-              };
-
-              while (std::getline(ss, entry, ';')) {
-                if (entry.empty()) continue;
-
-                // Tokenize robustly (some peers send weird orders/extra commas)
-                std::vector<std::string> tok;
-                std::stringstream es(entry);
-                std::string t;
-                while (std::getline(es, t, ',')) if (!t.empty()) tok.push_back(t);
-
-                if (tok.size() < 3) continue;
-
-                std::string name = tok[0];
-                std::string ip   = tok[1];
-                std::string portstr = tok[2];
-
-                // Heuristic: if tok[1] is not an IP but tok[2] is, swap (seen in the wild)
-                if (!is_ip(ip) && is_ip(portstr)) {
-                  std::swap(ip, portstr);
-                }
-
-                // Validate IP
-                if (!is_ip(ip)) continue;
-
-                int prt = -1;
-                try { prt = std::stoi(portstr); } catch (...) { prt = -1; }
-
-                // Validate port range (avoid -1, ephemeral junk, and privileged ports)
-                if (prt < 1024 || prt > 65535) continue;
-
-                // Skip ourselves
-                if (name == MY_GROUP) continue;
-
-                // Dedup/limit: do not fan out uncontrollably
-                std::string key = ip + ":" + std::to_string(prt);
-                if (known_endpoints.count(key)) continue;
-                if (connected >= 3) break; // keep it modest
-
-                int nfd = connect_peer(ip, prt);
-                if (nfd >= 0) ++connected;
-              }
+              // TEMPORARILY DISABLED: Stop auto-connecting to prevent P2P connection explosion
+              // This was causing exponential peer connections that overwhelmed the server
+              // preventing it from accepting client connections
+              std::cout << now() << " DEBUG: SERVERS received but auto-connect disabled to fix client connectivity\n";
             }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
             else if (payload.rfind("SENDMSG,", 0) == 0) {
