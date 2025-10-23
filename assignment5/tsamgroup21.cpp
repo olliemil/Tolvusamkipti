@@ -38,8 +38,46 @@
 #include <fstream>
 
 
-// ---------- Utilities ----------
+// A peer connection that uses framed server-to-server protocol.
+struct Peer {
+  int fd = -1;
+  std::string inbuf;              // raw framed bytes
+  std::deque<std::string> outq;  // framed buffers ready to send
+  std::string peer;               // ip:port string for logs
+  std::string name;               // learned group name from HELO (e.g., "A5 42")
+};
 
+// Per-connection state for client sockets
+struct Conn {
+  int fd;                         // socket fd
+  std::string inbuf;              // bytes accumulated from recv() until newline
+  std::deque<std::string> outq;   // lines pending to send (each ends with '\n')
+  std::string peer;               // "ip:port" for logs
+};
+
+std::string myGroup = "A5_21";
+std::string PUB_IP = "130.208.246.98";
+int port = 0; // default port, it will be set in main
+
+using clock = std::chrono::steady_clock;
+
+// Active client connections indexed by fd
+std::unordered_map<int, Conn> conns;
+// P2P peers (framed protocol) indexed by fd
+std::unordered_map<int, Peer> peers;
+
+static const size_t MAX_PEERS = 12;
+std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently, we keep it in a set to avoid duplicates
+std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_attempt; // last connect attempt time
+static const std::chrono::seconds CONNECT_BACKOFF(30); // min time between connect attempts to same endpoint
+// Global log file stream
+static std::ofstream logFile;
+
+std::deque<std::string> inbox; // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
+
+std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold;  // Messages we hold for other groups: key = TO group, value = deque of (FROM, BODY)
+// Deduplication for flooded/relayed SENDMSG to avoid loops
+std::unordered_set<std::string> seen_msgs; // key: from|to|body
 
 
 // Human-readable timestamp "YYYY-MM-DD HH:MM:SS" for logging
@@ -50,9 +88,6 @@ static std::string now() {
   strftime(buf, sizeof(buf), "%F %T", std::localtime(&t));
   return buf;
 }
-
-// Global log file stream
-static std::ofstream logFile;
 
 // Initialize logging to file (append mode)
 static void initLogging() {
@@ -78,14 +113,6 @@ static int set_nonblock(int fd) {
   if (fl < 0) return -1;
   return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
-
-// Per-connection state for client sockets
-struct Conn {
-  int fd;                         // socket fd
-  std::string inbuf;              // bytes accumulated from recv() until newline
-  std::deque<std::string> outq;   // lines pending to send (each ends with '\n')
-  std::string peer;               // "ip:port" for logs
-};
 
 // Whitespace trim (spaces/tabs/CR) – returns a trimmed copy
 static inline std::string trim(std::string s) {
@@ -132,57 +159,87 @@ namespace p2p {
   }
 }
 
-// A peer connection that uses framed server-to-server protocol.
-struct Peer {
-  int fd = -1;
-  std::string inbuf;              // raw framed bytes
-  std::deque<std::string> outq;  // framed buffers ready to send
-  std::string peer;               // ip:port string for logs
-  std::string name;               // learned group name from HELO (e.g., "A5 42")
-};
+std::string serverForwardMsg(const std::string& to_group, const std::string& from_group, const std::string& text) {
+  // this function will be used when we receive a SENDMSG for a different group than our own, we will then check if we are connected to that group; if we are we send them the message, otherwise we forward it to all our peers
+  std::string msg = "SENDMSG," + to_group + "," + text;
+  if (peers.empty()) {
+    logMessage(now() + " no peers to forward message to group " + to_group + text + "\n");
+    // we should then hold the message for later forwarding when we connect to more peers; using our hold map
+    hold[to_group].emplace_back(from_group, text);
+    return ""; // no peers to forward to
+  }
+  // check if we are connected to the target group
+  for (auto& kv : peers) {
+    Peer& p = kv.second;
+    if (p.name == to_group) {
+      p.outq.push_back(p2p::frame(msg));
+      logMessage(now() + " forwarded message to connected group " + to_group + " via peer " + p.peer + "\n");
+    }
+  }
+  // If not connected to the target group, forward to all peers
+  for (auto& kv : peers) {
+    Peer& p = kv.second;
+    p.outq.push_back(p2p::frame(msg));
+    logMessage(now() + " forwarded message to all peers for group " + to_group + "\n");
+  }
 
-int serverSendMsg(const std::string& to_group, const std::string& from_group, const std::string& text) {
-  // this function will be used when we receive a SENDMSG with the format SENDMSG,<TO_GROUP>,<FROM_GROUP>,<text>
-  // we will have to take in the message and the group as an input parameter
-  // we will have to check if we have any peers connected to the target group, we will do that by iterating through the peers map
-  //Send message to another group. The message content may be arbitrary data, but the whole command should not exceed 5000 bytes
-  return 0; // return 0 on success, -1 on failure
+  return "Message was forwarded"; 
 }
 
+std::string listServers() {
+  // we should return a SERVERS message with our group name, public IP and port + the same for all known peers
+  std::string msg = "SERVERS," + std::string(myGroup) + "," + PUB_IP + "," + std::to_string(port);
+  for (const auto& kv : peers) {
+    const Peer& p = kv.second;
+    msg += "," + p.name + "," + p.peer;
+  }
+  return msg;
+}
 
-// MUNA AÐ GERA 
+int connectPeer(const std::string& host, int port) {
+  if (peers.size() >= MAX_PEERS) {
+    logMessage(now() + " connectPeer: max peers reached\n");
+    return -1;
+  }
+  std::string key = host + ":" + std::to_string(port);
+  auto now_tp = std::chrono::steady_clock::now();
+  auto iterator = last_attempt.find(key);
 
-// std::string getAllConnectedPeers() {
-//   std::string response;
-//   // Start with our own server info
-//   std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
-              
-//               // Add all connected peers that have identified themselves
-//   for (const auto& kv : peers) {
-//     int peer_fd = kv.first;
-//     const Peer& peer = kv.second;
-//     if (peer_fd != pfd && !peer.name.empty()) { // Don't include the peer we're responding to, and only include named peers
-//       // Extract IP and port from peer.peer string (format: "ip:port")
-//       size_t colon_pos = peer.peer.find(':');
-//       if (colon_pos != std::string::npos) {
-//         std::string peer_ip = peer.peer.substr(0, colon_pos);
-//         std::string peer_port = peer.peer.substr(colon_pos + 1);
-//         resp += ";" + peer.name + "," + peer_ip + "," + peer_port;
-//       }
-//     }
-//   }
+  if (iterator != last_attempt.end() && now_tp - iterator->second < CONNECT_BACKOFF) {
+    return -1; // too soon to try again
+  }
+  if (known_endpoints.count(key)) {
+    // already connected/attempted recently
+    return -1;
+  }
+  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sockfd < 0) { 
+    perror("socket(connect_peer)"); 
+    return -1; 
+  }
+  // We can do blocking connect; set non-block afterwards to keep event loop simple.
+  sockaddr_in remoteAddr{}; remoteAddr.sin_family = AF_INET; remoteAddr.sin_port = htons(port);
+  if (inet_pton(AF_INET, host.c_str(), &remoteAddr.sin_addr) != 1) { std::cerr << "Bad seed host: " << host << "\n"; close(sockfd); return -1; }
+  if (connect(sockfd, (sockaddr*)&remoteAddr, sizeof(remoteAddr)) < 0) { perror("connect(seed)"); close(sockfd); return -1; }
+  set_nonblock(sockfd);
+  known_endpoints.insert(key); // the connection succeeded (we add it to known endpoints)
+  last_attempt[key] = now_tp; // record last attempt time for this endpoint
+  char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &remoteAddr.sin_addr, ip, sizeof(ip));
 
-//   return response;
-// }
+  return sockfd;
+}
 
 int main(int argc, char* argv[]) {
   if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
-  const char* MY_GROUP = "A5_21";
+  std::string myGroup = "A5_21";
   int port = std::atoi(argv[1]);
   // Optional seed peer (e.g., instructor server) to proactively connect to.
-  const char* seed_host = nullptr; // there is no seed host by default
+  std::string seed_host;
   int seed_port = 0; // no seed port by default
-  if (argc == 4) { seed_host = argv[2]; seed_port = std::atoi(argv[3]); } // 
+  if (argc == 4) { 
+    seed_host = argv[2]; 
+    seed_port = std::atoi(argv[3]); 
+  }
 
   // Safety limit: drop connections that try to buffer excessively (basic DoS guard)
   const size_t MAX_INBUF = 64 * 1024; // 64 KiB
@@ -190,29 +247,33 @@ int main(int argc, char* argv[]) {
 
   // ---------- Create and prepare listening socket ----------
   int ls = socket(AF_INET, SOCK_STREAM, 0);
-  if (ls < 0) { perror("socket"); return 1; }
+  if (ls < 0) { 
+    perror("socket"); 
+    return 1; 
+  }
   int on = 1; setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-  if (set_nonblock(ls) < 0) { perror("fcntl"); return 1; }
+  if (set_nonblock(ls) < 0) { 
+    perror("fcntl"); 
+    return 1; 
+  }
 
-  sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
-  if (bind(ls, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
-  if (listen(ls, 16) < 0) { perror("listen"); return 1; }
-  
+  sockaddr_in addr{}; 
+  addr.sin_family = AF_INET; 
+  addr.sin_addr.s_addr = INADDR_ANY; 
+  addr.sin_port = htons(port);
+
+  if (bind(ls, (sockaddr*)&addr, sizeof(addr)) < 0) { 
+    perror("bind"); 
+    return 1; 
+  }
+  if (listen(ls, 16) < 0) { 
+    perror("listen"); 
+    return 1; 
+  }
+
   // Initialize logging
   initLogging();
-  
   logMessage(now() + " SERVER listening on port " + std::to_string(port) + "\n");
-
-  // Active client connections indexed by fd
-  std::unordered_map<int, Conn> conns;
-
-  // P2P peers (framed protocol) indexed by fd
-  std::unordered_map<int, Peer> peers;
-  // Deduplication & rate-limit for outbound peer connections
-  static const size_t MAX_PEERS = 12;
-  std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently, we keep it in a set to avoid duplicates
-  std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_attempt; // last connect attempt time
-  static const std::chrono::seconds CONNECT_BACKOFF(30); // min time between connect attempts to same endpoint
 
   // Helper to connect to a peer and queue HELO
   auto connect_peer = [&](const std::string& host, int rport) -> int { // this is a lambda function to connect to a peer
@@ -252,17 +313,9 @@ int main(int argc, char* argv[]) {
   };
 
   // Public IP to disclose in SERVERS (change to TSAM IP when deployed)
-  std::string PUB_IP = "130.208.246.98";
-  using clock = std::chrono::steady_clock;
   auto last_ka = clock::now();
   bool toggle_statusreq = true; // alternate STATUSREQ to reduce noise
 
-  // Simple FIFO for messages addressed to MY_GROUP (one-node demo "mailbox")
-  std::deque<std::string> inbox;
-  // Messages we hold for other groups: key = TO group, value = deque of (FROM, BODY)
-  std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold; // this is to hold messages for other groups
-  // Deduplication for flooded/relayed SENDMSG to avoid loops
-  std::unordered_set<std::string> seen_msgs; // key: from|to|body
   auto dedup_key = [](const std::string& from, const std::string& to, const std::string& body){
     return from + "|" + to + "|" + body;
   };
