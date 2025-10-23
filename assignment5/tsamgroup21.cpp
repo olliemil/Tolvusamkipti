@@ -93,7 +93,7 @@ namespace p2p {
     out.push_back(char(STX));
     out += payload;
     out.push_back(char(ETX));
-    return out;
+    return out; 
   }
 
   // Pop a single framed payload from byte stream; returns true and sets payload if a full frame is available.
@@ -619,11 +619,11 @@ int main(int argc, char* argv[]) {
                   int nfd = connect_peer(ip, prt);
                   if (nfd >= 0) {
                     ++connected;
-                    logMessage(now() + " CONTROLLED-AUTO-CONNECT to " + name + " (" + std::to_string(peers.size()) + "/3 peers)\n");
+                    logMessage(now() + " CONTROLLED-AUTO-CONNECT to " + name + " (" + std::to_string(peers.size()) + "/8 peers)\n");
                   }
                 }
               } else {
-                logMessage(now() + " DEBUG: SERVERS received but we have enough peers (" + std::to_string(peers.size()) + "/3)\n");
+                logMessage(now() + " DEBUG: SERVERS received but we have enough peers (" + std::to_string(peers.size()) + "/8)\n");
               }
             }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
