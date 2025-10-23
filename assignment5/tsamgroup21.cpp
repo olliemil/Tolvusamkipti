@@ -39,7 +39,10 @@
 
 // ---------- Utilities ----------
 
-
+std::unordered_map<int, Peer> peers;
+std::string PUB_IP = "130.208.246.98";
+const char* MY_GROUP = "A5_21";
+int port; 
 
 // Human-readable timestamp "YYYY-MM-DD HH:MM:SS" for logging
 static std::string now() {
@@ -141,43 +144,43 @@ struct Peer {
 };
 
 int serverSendMsg(const std::string& to_group, const std::string& from_group, const std::string& text) {
-  // this function will be used when we receive a SENDMSG with the format SENDMSG,<TO_GROUP>,<FROM_GROUP>,<text>
-  // we will have to take in the message and the group as an input parameter
-  // we will have to check if we have any peers connected to the target group, we will do that by iterating through the peers map
-  //Send message to another group. The message content may be arbitrary data, but the whole command should not exceed 5000 bytes
+  // this function will be used when we receive a SENDMSG which is not for our group, we will then forward it to other peers
+
+  for (auto& kv : peers) {
+    Peer& p = kv.second;
+    if (!p.name.empty()) {
+      std::string p2p_msg = "SENDMSG," + to_group + "," + from_group + "," + text; // er ekki viss að þetta sé rétt
+      p.outq.push_back(p2p::frame(p2p_msg));
+    }
+  }
   return 0; // return 0 on success, -1 on failure
 }
 
+std::string getAllConnectedPeers() {
+  std::string response;
+  // we should get the connected peers in this format: A5_21,<ip>,<port>;<next peer>...
+  for (const auto& kv : peers) {
+    const Peer& p = kv.second;
+    if (!p.name.empty()) {
+      response += p.name + "," + p.peer + ";";
+    }
+  }
+  return response;
+}
 
-// MUNA AÐ GERA 
-
-// std::string getAllConnectedPeers() {
-//   std::string response;
-//   // Start with our own server info
-//   std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
-              
-//               // Add all connected peers that have identified themselves
-//   for (const auto& kv : peers) {
-//     int peer_fd = kv.first;
-//     const Peer& peer = kv.second;
-//     if (peer_fd != pfd && !peer.name.empty()) { // Don't include the peer we're responding to, and only include named peers
-//       // Extract IP and port from peer.peer string (format: "ip:port")
-//       size_t colon_pos = peer.peer.find(':');
-//       if (colon_pos != std::string::npos) {
-//         std::string peer_ip = peer.peer.substr(0, colon_pos);
-//         std::string peer_port = peer.peer.substr(colon_pos + 1);
-//         resp += ";" + peer.name + "," + peer_ip + "," + peer_port;
-//       }
-//     }
-//   }
-
-//   return response;
-// }
+std::string returnConnectedServers() {
+  const char* MY_GROUP = "A5_21" + std::string(",") + PUB_IP + "," + std::to_string(port);
+  std::string otherServers = getAllConnectedPeers();
+  std::string response = std::string("SERVERS,") + MY_GROUP + otherServers;
+  return response;
+}
 
 int main(int argc, char* argv[]) {
-  if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
-  const char* MY_GROUP = "A5_21";
-  int port = std::atoi(argv[1]);
+  if (argc < 4) { 
+    std::cerr << "Usage: ./tsamgroup21 <port> <ip> <seed port>\n"; 
+    return 1; 
+  }
+  port = std::atoi(argv[1]);
   // Optional seed peer (e.g., instructor server) to proactively connect to.
   const char* seed_host = nullptr; // there is no seed host by default
   int seed_port = 0; // no seed port by default
@@ -206,7 +209,6 @@ int main(int argc, char* argv[]) {
   std::unordered_map<int, Conn> conns;
 
   // P2P peers (framed protocol) indexed by fd
-  std::unordered_map<int, Peer> peers;
   // Deduplication & rate-limit for outbound peer connections
   static const size_t MAX_PEERS = 12;
   std::unordered_set<std::string> known_endpoints; // "ip:port" we've connected (or tried) recently, we keep it in a set to avoid duplicates
@@ -251,7 +253,6 @@ int main(int argc, char* argv[]) {
   };
 
   // Public IP to disclose in SERVERS (change to TSAM IP when deployed)
-  std::string PUB_IP = "130.208.246.98";
   using clock = std::chrono::steady_clock;
   auto last_ka = clock::now();
   bool toggle_statusreq = true; // alternate STATUSREQ to reduce noise

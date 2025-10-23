@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
     perror("connect"); return 1;
   }
 
-  std::cout << now() << " TX \"" << command << "\"\n";
+  std::cout << now() << " TX \"" << command << "\"\n"; // TX means transmit
   command += "\n";
   send(s, command.data(), command.size(), 0);
 
@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
     buf[n] = 0;
     std::string reply(buf);
     if (!reply.empty() && reply.back() == '\n') reply.pop_back();
-    std::cout << now() << " RX \"" << reply << "\"\n";
+    std::cout << now() << " RX \"" << reply << "\"\n"; // RX means receive
   }
   close(s);
   return 0;
