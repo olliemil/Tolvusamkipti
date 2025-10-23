@@ -260,6 +260,11 @@ int main(int argc, char* argv[]) {
   std::deque<std::string> inbox;
   // Messages we hold for other groups: key = TO group, value = deque of (FROM, BODY)
   std::unordered_map<std::string, std::deque<std::tuple<std::string,std::string>>> hold; // this is to hold messages for other groups
+  // Deduplication for flooded/relayed SENDMSG to avoid loops
+  std::unordered_set<std::string> seen_msgs; // key: from|to|body
+  auto dedup_key = [](const std::string& from, const std::string& to, const std::string& body){
+    return from + "|" + to + "|" + body;
+  };
 
   // Queue a line for sending (appends '\n' so the client receives one line per reply)
   auto enqueue = [&](Conn& c, const std::string& line) {
@@ -437,22 +442,54 @@ int main(int argc, char* argv[]) {
                 // Debug: show parsed/normalized fields (comment out later if too verbose)
                 logMessage(now() + " PARSED to=[" + to + "] text=[" + text + "]\n");
 
+                // Enforce assignment limit: whole command <= 5000 bytes (conservative cap on text)
+                if (text.size() > 4800) text.resize(4800);
+
+                // Dedup: avoid re-forwarding the same content around the mesh
+                std::string key = dedup_key(MY_GROUP, to, text);
+                if (!seen_msgs.insert(key).second) {
+                  logMessage(now() + std::string(" DUPLICATE SUPPRESSED SENDMSG to [") + to + "] body size=" + std::to_string(text.size()) + "\n");
+                  enqueue(c, "OK");
+                  goto after_sendmsg_client;
+                }
+
                 if (to == MY_GROUP) {
                   inbox.push_back(text);
                 } else {
-                  // Forward message to P2P network for other groups
+                  // Hold for destination and forward to all known peers
+                  hold[to].push_back({MY_GROUP, text});
                   std::string p2p_msg = "SENDMSG," + to + "," + MY_GROUP + "," + text;
                   for (auto& kv : peers) {
                     kv.second.outq.push_back(p2p::frame(p2p_msg));
                   }
-                  logMessage(now() + " P2P-FORWARD to [" + to + "] from [" + MY_GROUP + "]: " + text + "\n");
+                  logMessage(now() + " RELAY-HOLD for [" + to + "] from [" + MY_GROUP + "]\n");
                 }
                 enqueue(c, "OK");
+                after_sendmsg_client: ;
               } else {
                 enqueue(c, "ERR,BADFORMAT");
               }
             } else {
               enqueue(c, "ERR,BADFORMAT");
+            }
+
+          } else if (line.rfind("GETMSGS,", 0) == 0) {
+            // Client asks: GETMSGS,<GROUP>
+            std::string who = trim(line.substr(8));
+            auto it = hold.find(who);
+            int sent = 0;
+            if (it != hold.end()) {
+              while (!it->second.empty() && sent < 50) { // cap per reply burst
+                std::string from = std::get<0>(it->second.front());
+                std::string body = std::get<1>(it->second.front());
+                it->second.pop_front();
+                enqueue(c, std::string("SENDMSG,") + who + "," + from + "," + body);
+                ++sent;
+              }
+              if (it->second.empty()) hold.erase(it);
+              if (sent == 0) enqueue(c, "EMPTY");
+            } else {
+              enqueue(c, "EMPTY");
             }
 
           } else if (line == "GETMSG") {
@@ -615,12 +652,20 @@ int main(int argc, char* argv[]) {
                 std::string to   = trim(payload.substr(8, c1 - 8));
                 std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
                 std::string body = payload.substr(c2 + 1);
-                if (to == MY_GROUP) {
+                // Dedup first
+                std::string key = dedup_key(from, to, body);
+                if (!seen_msgs.insert(key).second) {
+                  logMessage(now() + std::string(" DUPLICATE SUPPRESSED P2P SENDMSG ") + from + "->" + to + "\n");
+                } else if (to == MY_GROUP) {
                   inbox.push_back(body);
                   logMessage(now() + " MSG-ENQUEUE from [" + from + "] -> [" + to + "]: " + body + "\n");
                 } else {
-                  // Hold for other groups until they ask via GETMSGS,<GROUP>
+                  // Hold for target and conservatively forward to other peers (simple flood)
                   hold[to].push_back({from, body});
+                  for (auto& kvf : peers) {
+                    if (kvf.first == pfd) continue; // don't echo straight back to origin
+                    kvf.second.outq.push_back(p2p::frame(payload));
+                  }
                   logMessage(now() + " RELAY-HOLD for [" + to + "] from [" + from + "]\n");
                 }
               }
