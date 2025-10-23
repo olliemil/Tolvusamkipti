@@ -65,6 +65,9 @@ std::unordered_set<std::string> seen_msgs; // key: from|to|body
 // Keep-alive tracking
 std::chrono::steady_clock::time_point last_keepalive = steady_clock::now();
 
+// Track last peer nudge time
+std::chrono::steady_clock::time_point last_peer_nudge = steady_clock::now();
+
 // Forward declarations
 std::string serverForwardMsg(const std::string& to_group, const std::string& from_group, const std::string& text);
 
@@ -350,16 +353,50 @@ int connectPeer(const std::string& host, int port) {
   Peer p; // we create a new Peer instance, should be named peer but that is already preoccupied
   p.fd  = sockfd;
   p.peer = std::string(ip) + ":" + std::to_string(port);
-  p.outq.push_back(p2p::frame(std::string("HELO,") + MY_GROUP)); // we always want to be kind and introduce ourselves
+  std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
   peers.insert({sockfd, std::move(p)}); // we add the new peer to our peers map
   logMessage(now() + " OUTBOUND " + host + ":" + std::to_string(port) + " (HELLO queued)\n");
 
   return sockfd;
 }
 
+void nudgePeers() {
+  // If we have too few peers, nudge by asking existing peers more frequently
+  if (peers.size() < 3) {
+    for (auto& kv : peers) {
+      kv.second.outq.push_back(p2p::frame("STATUSREQ"));
+    }
+    logMessage(now() + " STATUSREQ " + std::to_string(peers.size()) + "\n");
+  }
+
+}
+
+bool isInstructorServer(const std::string& peer) {
+  // ports we know are 5001, 5002, 5003
+  size_t colon_pos = peer.find(':');
+  if (colon_pos == std::string::npos) return false;
+  int port = std::stoi(peer.substr(colon_pos + 1));
+  return (port == 5001 || port == 5002 || port == 5003);
+}
+
+void demoteInstructorServers() {
+  // if max servers reached, we drop connections to instructor servers first
+  if (peers.size() > MAX_PEERS) {
+    for (auto it = peers.begin(); it != peers.end(); ) {
+      if (isInstructorServer(it->second.peer)) {
+        logMessage(now() + "Demoted instructor servers");
+        close(it->first);
+        it = peers.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
-  int port = std::atoi(argv[1]);
+  port = std::atoi(argv[1]);
   // Optional seed peer (e.g., instructor server) to proactively connect to.
   std::string seed_host;
   int seed_port = 0; // no seed port by default
@@ -460,19 +497,16 @@ int main(int argc, char* argv[]) {
       sendKeepAlive(toggle_statusreq);
     }
 
-    // If we have too few peers, nudge by asking existing peers more frequently
-    static auto last_peer_nudge = steady_clock::now();
-    auto nudge_interval = peers.size() < 3 ? std::chrono::seconds(120) : std::chrono::seconds(300); // Reduced frequency
-    if (peers.size() < 3 && steady_clock::now() - last_peer_nudge >= nudge_interval) { // Only if very few peers
-      for (auto& kv : peers) {
-        kv.second.outq.push_back(p2p::frame("STATUSREQ"));
+      // Nudge peers if less than 3 and last nudge was over 60s ago
+      if (peers.size() < 3 && steady_clock::now() - last_peer_nudge >= std::chrono::seconds(60)) {
+        nudgePeers();
+        last_peer_nudge = steady_clock::now();
       }
-      last_peer_nudge = steady_clock::now();
-      logMessage(now() + " PEER-NUDGE: asking " + std::to_string(peers.size()) + " peers for more connections (target: 3-8)\n");
-    }
 
+    
     // New inbound connections ready?
     if (pfds[0].revents & POLLIN) {
+      logMessage(now() + " ACCEPT event detected\n");
       sockaddr_in cli{}; 
       socklen_t cl = sizeof(cli);
       // Accept all pending connections (drain the accept queue)
@@ -483,7 +517,8 @@ int main(int argc, char* argv[]) {
           perror("accept"); break;
         }
         set_nonblock(fd);
-        char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &cli.sin_addr, ip, sizeof(ip));
+        char ip[INET_ADDRSTRLEN]; 
+        inet_ntop(AF_INET, &cli.sin_addr, ip, sizeof(ip));
         int cport = ntohs(cli.sin_port);
         Conn c{fd, {}, {}, std::string(ip) + ":" + std::to_string(cport)};
         conns.emplace(fd, std::move(c));
