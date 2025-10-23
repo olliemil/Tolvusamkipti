@@ -1,22 +1,3 @@
-// tsamgroup21.cpp — TSAM A5 group server (A5 21)
-//
-// What this does (client↔server protocol only):
-//  - Listens on a TCP port (non-blocking) and multiplexes clients with poll()
-//  - Commands (newline-terminated):
-//      LISTSERVERS                -> "SERVERS,A5 21,127.0.0.1,<port>"
-//      SENDMSG,<GROUPID>,<text>   -> "OK" (stores text if GROUPID == MY_GROUP)
-//      GETMSG                     -> "MSG,<text>" or "EMPTY"
-//  - Per-connection state (Conn): input buffer, output queue, peer string
-//  - Robust I/O:
-//      * Non-blocking sockets
-//      * recv() loops until EAGAIN; partial lines buffered
-//      * send() handles partial writes via outq
-//
-// Notes:
-//  - This file is intentionally single-threaded (poll-based).
-//  - It’s a clean base to extend with the P2P server-to-server protocol (HELO/SERVERS/KEEPALIVE).
-//  - For early-bonus local demo, LISTSERVERS reports 127.0.0.1; replace with public IP when deploying on TSAM if required by spec.
-
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>

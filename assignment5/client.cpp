@@ -1,14 +1,3 @@
-// client.cpp — simple command-line client for tsamgroup21 server
-// Usage:
-//   ./client <group-id> <message>
-// Example:
-//   ./client "A5 29" "Weekend grind with the boys!"
-//
-// Optional full form for manual commands:
-//   ./client <ip> <port> <command> [args...]
-//
-// Automatically connects to localhost:4100 unless IP/port provided.
-
 #include <arpa/inet.h>
 #include <chrono>
 #include <cstring>
