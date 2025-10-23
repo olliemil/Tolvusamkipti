@@ -707,7 +707,7 @@ int main(int argc, char* argv[]) {
                   logMessage(now() + std::string(" DUPLICATE SUPPRESSED P2P SENDMSG ") + from + "->" + to + "\n");
                 } else if (to == MY_GROUP) {
                   inbox.push_back(body);
-                  logMessage(now() + " MSG-ENQUEUE from [" + from + "] -> [" + to + "]: " + body + "\n");
+                  logMessage(now() + " MSG-ENQUEUE from, here is the fetch[" + from + "] -> [" + to + "]: " + body + "\n");
                 } else {
                   // Hold for target and conservatively forward to other peers (simple flood)
                   hold[to].push_back({from, body});
