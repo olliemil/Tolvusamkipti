@@ -1,3 +1,6 @@
+#include <string>
+#include <functional>
+#include <iostream>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -18,6 +21,13 @@
 #include <tuple>
 #include <fstream>
 #include <functional>
+
+// --- Small helpers to reduce duplication ---
+static inline std::string makeDedupKey(const std::string& from,
+                                       const std::string& to,
+                                       const std::string& body) {
+  return from + "|" + to + "|" + body;
+}
 
 
 // A peer connection that uses framed server-to-server protocol.
@@ -213,13 +223,15 @@ std::string serverForwardMsg(const std::string& to_group, const std::string& fro
   return "Message forwarded to all peers"; 
 }
 
-std::string listServers() {
+std::string listServers(int exclude_fd = -1) {
   // Build SERVERS response with our group name, public IP and port + all connected peers
   std::string response = "SERVERS," + std::string(MY_GROUP) + "," + PUB_IP + "," + std::to_string(port);
   
   // Add all connected peers that have identified themselves
   for (const auto& kv : peers) {
+    int peer_fd = kv.first;
     const Peer& p = kv.second;
+    if (exclude_fd != -1 && peer_fd == exclude_fd) continue; // don't include the requester if provided
     if (!p.name.empty()) {
       // Extract IP and port from peer.peer string (format: "ip:port")
       size_t colon_pos = p.peer.find(':');
@@ -233,8 +245,7 @@ std::string listServers() {
   return response;
 }
 
-void serverSendMsg(const std::string& line, Conn& c, 
-                   const std::function<std::string(const std::string&, const std::string&, const std::string&)>& dedup_key,
+void serverSendMsg(const std::string& line, Conn& c,
                    const std::function<void(Conn&, const std::string&)>& enqueue) {
   // SENDMSG,<GROUPID>,<text>
   // Parse two commas after "SENDMSG,"
@@ -252,7 +263,7 @@ void serverSendMsg(const std::string& line, Conn& c,
       if (text.size() > 4800) text.resize(4800);
 
       // Dedup: avoid re-forwarding the same content around the mesh
-      std::string key = dedup_key(MY_GROUP, to, text);
+      std::string key = makeDedupKey(MY_GROUP, to, text);
       if (!seen_msgs.insert(key).second) {
         logMessage(now() + std::string(" DUPLICATE SUPPRESSED SENDMSG to [") + to + "] body size=" + std::to_string(text.size()) + "\n");
         enqueue(c, "OK");
@@ -359,7 +370,7 @@ int connectPeer(const std::string& host, int port) {
 
 int main(int argc, char* argv[]) {
   if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
-  int port = std::atoi(argv[1]);
+  ::port = std::atoi(argv[1]);
   // Optional seed peer (e.g., instructor server) to proactively connect to.
   std::string seed_host;
   int seed_port = 0; // no seed port by default
@@ -405,9 +416,7 @@ int main(int argc, char* argv[]) {
   // Public IP to disclose in SERVERS (change to TSAM IP when deployed)
   bool toggle_statusreq = true; // alternate STATUSREQ to reduce noise
 
-  auto dedup_key = [](const std::string& from, const std::string& to, const std::string& body){
-    return from + "|" + to + "|" + body;
-  };
+  // dedup_key lambda removed (now using makeDedupKey)
 
   // Queue a line for sending (appends '\n' so the client receives one line per reply)
   auto enqueue = [&](Conn& c, const std::string& line) {
@@ -548,7 +557,7 @@ int main(int argc, char* argv[]) {
             enqueue(c, listServers());
 
           } else if (line.rfind("SENDMSG,", 0) == 0) {
-            serverSendMsg(line, c, dedup_key, enqueue);
+            serverSendMsg(line, c, enqueue);
 
           } else if (line.rfind("GETMSGS,", 0) == 0 || line == "GETMSG") {
             std::string response = serverGetMsg(line);
@@ -623,25 +632,7 @@ int main(int argc, char* argv[]) {
             // Handle HELO: reply SERVERS with our public reachability and all connected peers
             if (payload.rfind("HELO,", 0) == 0) {
               p.name = payload.substr(5); // remember their group name
-              
-              // Start with our own server info
-              std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
-              
-              // Add all connected peers that have identified themselves
-              for (const auto& kv : peers) {
-                int peer_fd = kv.first;
-                const Peer& peer = kv.second;
-                if (peer_fd != pfd && !peer.name.empty()) { // Don't include the peer we're responding to, and only include named peers
-                  // Extract IP and port from peer.peer string (format: "ip:port")
-                  size_t colon_pos = peer.peer.find(':');
-                  if (colon_pos != std::string::npos) {
-                    std::string peer_ip = peer.peer.substr(0, colon_pos);
-                    std::string peer_port = peer.peer.substr(colon_pos + 1);
-                    resp += ";" + peer.name + "," + peer_ip + "," + peer_port;
-                  }
-                }
-              }
-              
+              std::string resp = listServers(pfd);
               p.outq.push_back(p2p::frame(resp));
             }
             // Auto-connect to peers advertised by others
@@ -711,7 +702,7 @@ int main(int argc, char* argv[]) {
                 std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
                 std::string body = payload.substr(c2 + 1);
                 // Dedup first
-                std::string key = dedup_key(from, to, body);
+                std::string key = makeDedupKey(from, to, body);
                 if (!seen_msgs.insert(key).second) {
                   logMessage(now() + std::string(" DUPLICATE SUPPRESSED P2P SENDMSG ") + from + "->" + to + "\n");
                 } else if (to == MY_GROUP) {
