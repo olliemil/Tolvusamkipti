@@ -35,8 +35,11 @@
 #include <sstream>
 #include <unordered_set>
 #include <tuple>
+#include <fstream>
 
 // ---------- Utilities ----------
+
+
 
 // Human-readable timestamp "YYYY-MM-DD HH:MM:SS" for logging
 static std::string now() {
@@ -45,6 +48,27 @@ static std::string now() {
   char buf[32];
   strftime(buf, sizeof(buf), "%F %T", std::localtime(&t));
   return buf;
+}
+
+// Global log file stream
+static std::ofstream logFile;
+
+// Initialize logging to file (append mode)
+static void initLogging() {
+  logFile.open("server.log", std::ios::app); // append mode - won't erase previous logs
+  if (logFile.is_open()) {
+    logFile << "\n========== SERVER STARTED " << now() << " ==========\n";
+    logFile.flush();
+  }
+}
+
+// Log to both console and file
+static void logMessage(const std::string& msg) {
+  std::cout << msg; // to console
+  if (logFile.is_open()) {
+    logFile << msg; // to file
+    logFile.flush(); // ensure immediate write
+  }
 }
 
 // Put a socket/file descriptor into non-blocking mode (so recv/accept/send never block the event loop)
@@ -172,7 +196,11 @@ int main(int argc, char* argv[]) {
   sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
   if (bind(ls, (sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); return 1; }
   if (listen(ls, 16) < 0) { perror("listen"); return 1; }
-  std::cout << now() << " SERVER listening on port " << port << "\n";
+  
+  // Initialize logging
+  initLogging();
+  
+  logMessage(now() + " SERVER listening on port " + std::to_string(port) + "\n");
 
   // Active client connections indexed by fd
   std::unordered_map<int, Conn> conns;
@@ -218,7 +246,7 @@ int main(int argc, char* argv[]) {
     p.outq.push_back(p2p::frame(std::string("HELO,") + MY_GROUP));
     // when we connect to a peer, we queue a HELO message to introduce ourselves
     peers.emplace(fd, std::move(p)); 
-    std::cout << now() << " OUTBOUND " << host << ":" << rport << " fd=" << fd << " (HELLO queued)\n";
+    logMessage(now() + " OUTBOUND " + host + ":" + std::to_string(rport) + " fd=" + std::to_string(fd) + " (HELLO queued)\n");
     return fd;
   };
 
@@ -282,14 +310,15 @@ int main(int argc, char* argv[]) {
       last_ka = clock::now();
     }
 
-    // If we somehow have too few peers, nudge by asking existing peers again
-    // FIXED: Only do this occasionally, not every loop iteration
+    // If we have too few peers, nudge by asking existing peers more frequently
     static auto last_peer_nudge = clock::now();
-    if (peers.size() < 3 && clock::now() - last_peer_nudge >= std::chrono::seconds(30)) {
+    auto nudge_interval = peers.size() < 2 ? std::chrono::seconds(120) : std::chrono::seconds(300); // Reduced frequency
+    if (peers.size() < 2 && clock::now() - last_peer_nudge >= nudge_interval) { // Only if very few peers
       for (auto& kv : peers) {
         kv.second.outq.push_back(p2p::frame("STATUSREQ"));
       }
       last_peer_nudge = clock::now();
+      logMessage(now() + " PEER-NUDGE: asking " + std::to_string(peers.size()) + " peers for more connections\n");
     }
 
     // New inbound connections ready?
@@ -307,7 +336,7 @@ int main(int argc, char* argv[]) {
         int cport = ntohs(cli.sin_port);
         Conn c{fd, {}, {}, std::string(ip) + ":" + std::to_string(cport)};
         conns.emplace(fd, std::move(c));
-        std::cout << now() << " ACCEPT " << ip << ":" << cport << " fd=" << fd << "\n";
+        logMessage(now() + " ACCEPT " + ip + ":" + std::to_string(cport) + " fd=" + std::to_string(fd) + "\n");
       }
     }
 
@@ -331,14 +360,14 @@ int main(int argc, char* argv[]) {
               p.peer = c.peer;
               p.inbuf.assign(buf, buf + n);
               peers.emplace(fd, std::move(p));
-              std::cout << now() << " PROMOTE " << c.peer << " fd=" << fd << " to P2P\n";
+              logMessage(now() + " PROMOTE " + c.peer + " fd=" + std::to_string(fd) + " to P2P\n");
               conns.erase(it);
               goto next_fd; // will be handled in the peers section
             } else {
               c.inbuf.append(buf, buf + n);
             }
           } else if (n == 0) {
-            std::cout << now() << " CLOSE " << c.peer << " fd=" << fd << "\n";
+            logMessage(now() + " CLOSE " + c.peer + " fd=" + std::to_string(fd) + "\n");
             close(fd); conns.erase(it); goto next_fd;
           } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -357,7 +386,7 @@ int main(int argc, char* argv[]) {
         while ((pos = c.inbuf.find('\n')) != std::string::npos) {
           std::string line = c.inbuf.substr(0, pos); c.inbuf.erase(0, pos + 1);
           if (!line.empty() && line.back() == '\r') line.pop_back();
-          std::cout << now() << " RX " << c.peer << " \"" << line << "\"\n";
+          logMessage(now() + " RX " + c.peer + " \"" + line + "\"\n");
 
           if (line == "LISTSERVERS") {
             // Start with our own server info
@@ -406,7 +435,7 @@ int main(int argc, char* argv[]) {
                 normalize(text);
 
                 // Debug: show parsed/normalized fields (comment out later if too verbose)
-                std::cout << now() << " PARSED to=[" << to << "] text=[" << text << "]\n";
+                logMessage(now() + " PARSED to=[" + to + "] text=[" + text + "]\n");
 
                 if (to == MY_GROUP) {
                   inbox.push_back(text);
@@ -416,7 +445,7 @@ int main(int argc, char* argv[]) {
                   for (auto& kv : peers) {
                     kv.second.outq.push_back(p2p::frame(p2p_msg));
                   }
-                  std::cout << now() << " P2P-FORWARD to [" << to << "] from [" << MY_GROUP << "]: " << text << "\n";
+                  logMessage(now() + " P2P-FORWARD to [" + to + "] from [" + MY_GROUP + "]: " + text + "\n");
                 }
                 enqueue(c, "OK");
               } else {
@@ -449,7 +478,7 @@ int main(int argc, char* argv[]) {
           if ((size_t)n < front.size()) { c.outq.front() = front.substr(n); break; }
           else {
             std::string log = front; if (!log.empty() && log.back() == '\n') log.pop_back();
-            std::cout << now() << " TX " << c.peer << " \"" << log << "\"\n";
+            logMessage(now() + " TX " + c.peer + " \"" + log + "\"\n");
             c.outq.pop_front();
           }
         }
@@ -484,7 +513,7 @@ int main(int argc, char* argv[]) {
             if (n > 0) {
               p.inbuf.append(buf, buf + n);
             } else if (n == 0) {
-              std::cout << now() << " PEER-CLOSE " << p.peer << " fd=" << pfd << "\n";
+              logMessage(now() + " PEER-CLOSE " + p.peer + " fd=" + std::to_string(pfd) + "\n");
               close(pfd); peers.erase(pit); goto next_peer;
             } else {
               if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -494,7 +523,7 @@ int main(int argc, char* argv[]) {
 
           // Parse all complete frames
           while (p2p::pop(p.inbuf, payload)) {
-            std::cout << now() << " P2P-RX " << p.peer << " \"" << payload << "\"\n";
+            logMessage(now() + " P2P-RX " + p.peer + " \"" + payload + "\"\n");
 
             // Handle HELO: reply SERVERS with our public reachability and all connected peers
             if (payload.rfind("HELO,", 0) == 0) {
@@ -571,11 +600,11 @@ int main(int argc, char* argv[]) {
                   int nfd = connect_peer(ip, prt);
                   if (nfd >= 0) {
                     ++connected;
-                    std::cout << now() << " CONTROLLED-AUTO-CONNECT to " << name << " (" << peers.size() << "/3 peers)\n";
+                    logMessage(now() + " CONTROLLED-AUTO-CONNECT to " + name + " (" + std::to_string(peers.size()) + "/3 peers)\n");
                   }
                 }
               } else {
-                std::cout << now() << " DEBUG: SERVERS received but we have enough peers (" << peers.size() << "/3)\n";
+                logMessage(now() + " DEBUG: SERVERS received but we have enough peers (" + std::to_string(peers.size()) + "/3)\n");
               }
             }
             // Handle SENDMSG,<TO>,<FROM>,<Message...>
@@ -588,11 +617,11 @@ int main(int argc, char* argv[]) {
                 std::string body = payload.substr(c2 + 1);
                 if (to == MY_GROUP) {
                   inbox.push_back(body);
-                  std::cout << now() << " MSG-ENQUEUE from [" << from << "] -> [" << to << "]: " << body << "\n";
+                  logMessage(now() + " MSG-ENQUEUE from [" + from + "] -> [" + to + "]: " + body + "\n");
                 } else {
                   // Hold for other groups until they ask via GETMSGS,<GROUP>
                   hold[to].push_back({from, body});
-                  std::cout << now() << " RELAY-HOLD for [" << to << "] from [" << from << "]\n";
+                  logMessage(now() + " RELAY-HOLD for [" + to + "] from [" + from + "]\n");
                 }
               }
               // no ACK required by spec
@@ -652,8 +681,8 @@ int main(int argc, char* argv[]) {
             } else {
               // Pretty log: peel payload for display
               std::string tmp = b, pl;
-              if (p2p::pop(tmp, pl)) std::cout << now() << " P2P-TX " << p.peer << " \"" << pl << "\"\n";
-              else std::cout << now() << " P2P-TX " << p.peer << " (" << b.size() << " bytes)\n";
+              if (p2p::pop(tmp, pl)) logMessage(now() + " P2P-TX " + p.peer + " \"" + pl + "\"\n");
+              else logMessage(now() + " P2P-TX " + p.peer + " (" + std::to_string(b.size()) + " bytes)\n");
               p.outq.pop_front();
             }
           }
