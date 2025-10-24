@@ -18,6 +18,7 @@
 #include <tuple>
 #include <fstream>
 #include <functional>
+#include "helper.cpp"
 
 
 // A peer connection that uses framed server-to-server protocol.
@@ -71,6 +72,9 @@ std::chrono::steady_clock::time_point last_peer_nudge = steady_clock::now();
 // Forward declarations
 std::string serverForwardMsg(const std::string& to_group, const std::string& from_group, const std::string& text);
 
+
+
+// is already implemented in helper.cpp
 // Human-readable timestamp "YYYY-MM-DD HH:MM:SS" for logging
 static std::string now() {
   using namespace std::chrono;
@@ -80,6 +84,7 @@ static std::string now() {
   return buf;
 }
 
+// is already implemented in helper.cpp
 // Initialize logging to file (append mode)
 static void initLogging() {
   logFile.open("server.log", std::ios::app); // append mode - won't erase previous logs
@@ -88,7 +93,7 @@ static void initLogging() {
     logFile.flush();
   }
 }
-
+// is already implemented in helper.cpp
 // Log to both console and file
 static void logMessage(const std::string& msg) {
   std::cout << msg; // to console
@@ -97,7 +102,7 @@ static void logMessage(const std::string& msg) {
     logFile.flush(); // ensure immediate write
   }
 }
-
+// is already implemented in helper.cpp
 // Put a socket/file descriptor into non-blocking mode (so recv/accept/send never block the event loop)
 static int set_nonblock(int fd) {
   int fl = fcntl(fd, F_GETFL, 0);
@@ -105,6 +110,7 @@ static int set_nonblock(int fd) {
   return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
+// is already implemented in helper.cpp
 // Whitespace trim (spaces/tabs/CR) – returns a trimmed copy
 static inline std::string trim(std::string s) {
   size_t a = 0;
@@ -371,6 +377,7 @@ void nudgePeers() {
 
 }
 
+// is already implemented in helper.cpp
 bool isInstructorServer(const std::string& peer) {
   // ports we know are 5001, 5002, 5003
   size_t colon_pos = peer.find(':');
