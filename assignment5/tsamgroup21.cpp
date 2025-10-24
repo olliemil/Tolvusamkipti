@@ -306,8 +306,11 @@ std::string serverGetMsg(const std::string& line) {
 
 int connectPeer(const std::string& host, int port) {
   if (peers.size() >= MAX_PEERS) {
-    logMessage(now() + " connectPeer: max peers reached (" + std::to_string(peers.size()) + "/" + std::to_string(MAX_PEERS) + ")\n");
-    return -1;
+    int dropped = demoteInstructorServers();
+    if (dropped == 0) {
+      logMessage(now() + " connectPeer: max peers reached (" + std::to_string(peers.size()) + "/" + std::to_string(MAX_PEERS) + ")\n");
+      return -1;
+    }
   }
   std::string key = host + ":" + std::to_string(port);
   auto curTime = std::chrono::steady_clock::now(); 
@@ -379,20 +382,184 @@ bool isInstructorServer(const std::string& peer) {
   return (port == 5001 || port == 5002 || port == 5003);
 }
 
-void demoteInstructorServers() {
+int demoteInstructorServers() {
   // if max servers reached, we drop connections to instructor servers first
   if (peers.size() > MAX_PEERS) {
     for (auto it = peers.begin(); it != peers.end(); ) {
       if (isInstructorServer(it->second.peer)) {
-        logMessage(now() + "Demoted instructor servers");
+        logMessage(now() + " Demoted instructor servers");
         close(it->first);
         it = peers.erase(it);
+        logMessage(now() + " Demoted instructor server: " + it->second.peer);
+        return 1; // dropped one
       } else {
         ++it;
       }
     }
   }
+  return 0; // nothing dropped
 }
+
+
+// Helper: validate IPv4 dotted string
+static inline bool is_valid_ipv4(const std::string& s) {
+  in_addr tmp{};
+  return inet_pton(AF_INET, s.c_str(), &tmp) == 1;
+}
+
+// Handle incoming "SERVERS,..." payload: controlled auto-connect
+static void handle_servers_payload(Peer& src_peer, const std::string& payload) {
+  // payload format: "SERVERS,Name,IP,Port;Name,IP,Port;..."
+  if (peers.size() >= MAX_PEERS) {
+    logMessage(now() + " DEBUG: SERVERS received but we have max peers (" + std::to_string(peers.size()) + "/" + std::to_string(MAX_PEERS) + ")\n");
+    return;
+  }
+
+  std::string list = payload.substr(8); // skip "SERVERS,"
+  std::stringstream ss(list);
+  std::string entry;
+  int connected = 0;
+  int max_new_connections = peers.size() < 3 ? 2 : 1;
+
+  while (std::getline(ss, entry, ';') && connected < max_new_connections && peers.size() < MAX_PEERS) {
+    if (entry.empty()) continue;
+
+    // Tokenize entry: Name,IP,Port
+    std::vector<std::string> tok;
+    std::stringstream es(entry);
+    std::string t;
+    while (std::getline(es, t, ',')) {
+      if (!t.empty()) tok.push_back(t);
+    }
+    if (tok.size() < 3) continue;
+
+    const std::string& name = tok[0];
+    const std::string& ip = tok[1];
+    const std::string& portstr = tok[2];
+
+    if (!is_valid_ipv4(ip)) continue;
+
+    int prt = -1;
+    try { prt = std::stoi(portstr); } catch (...) { prt = -1; }
+    if (prt < 1024 || prt > 65535) continue;
+    if (name == MY_GROUP) continue;
+
+    std::string key = ip + ":" + std::to_string(prt);
+    if (known_endpoints.count(key)) continue;
+
+    int nfd = connectPeer(ip, prt);
+    if (nfd >= 0) {
+      ++connected;
+      logMessage(now() + " CONTROLLED-AUTO-CONNECT to " + name + " (" + std::to_string(peers.size()) + "/" + std::to_string(MAX_PEERS) + " peers)\n");
+    }
+  }
+}
+
+// Handle incoming framed SENDMSG from a peer (P2P)
+static void handle_p2p_sendmsg(int origin_fd, Peer& src_peer, const std::string& payload) {
+  // payload = "SENDMSG,<TO>,<FROM>,<Message...>"
+  size_t c1 = payload.find(',', 8);
+  size_t c2 = (c1 == std::string::npos) ? std::string::npos : payload.find(',', c1 + 1);
+  if (c1 == std::string::npos || c2 == std::string::npos) return;
+
+  std::string to   = trim(payload.substr(8, c1 - 8));
+  std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
+  std::string body = payload.substr(c2 + 1);
+
+  std::string key = std::string(from) + "|" + std::string(to) + "|" + body;
+  if (!seen_msgs.insert(key).second) {
+    logMessage(now() + std::string(" DUPLICATE SUPPRESSED P2P SENDMSG ") + from + "->" + to + "\n");
+    return;
+  }
+
+  if (to == MY_GROUP) {
+    inbox.push_back(body);
+    logMessage(now() + " MSG-ENQUEUE from [" + from + "] -> [" + to + "]: " + body + "\n");
+  } else {
+    // Hold for target and relay to other peers (don't echo back to origin)
+    hold[to].push_back({from, body});
+    for (auto& kvf : peers) {
+      if (kvf.first == origin_fd) continue;
+      kvf.second.outq.push_back(p2p::frame(payload));
+    }
+    logMessage(now() + " RELAY-HOLD for [" + to + "] from [" + from + "]\n");
+  }
+}
+
+// STATUSREQ -> produce STATUSRESP listing hold sizes
+static void handle_statusreq(Peer& p) {
+  std::string resp = "STATUSRESP";
+  for (auto& kv : hold) {
+    resp += "," + kv.first + "," + std::to_string(kv.second.size());
+  }
+  p.outq.push_back(p2p::frame(resp));
+}
+
+// STATUSRESP,<GROUP1>,<COUNT1>,<GROUP2>,<COUNT2>,...
+static void handle_statusresp(Peer& p, const std::string& payload) {
+  std::string data = payload.substr(11); // skip "STATUSRESP,"
+  std::istringstream iss(data);
+  std::string token;
+  std::string group;
+  bool expecting_group = true;
+
+  while (std::getline(iss, token, ',')) {
+    if (expecting_group) {
+      group = token;
+      expecting_group = false;
+    } else {
+      try {
+        int count = std::stoi(token);
+        if (count > 0) {
+          logMessage(now() + " STATUSRESP: peer " + p.peer + " holds " + std::to_string(count) + " messages for " + group + "\n");
+          if (group == MY_GROUP) {
+            p.outq.push_back(p2p::frame(std::string("GETMSGS,") + MY_GROUP));
+            logMessage(now() + " REQUESTING messages for our group from peer " + p.peer + "\n");
+          }
+        }
+      } catch (...) {
+        // we just keep going when we receive an error
+      }
+      expecting_group = true;
+    }
+  }
+}
+
+// KEEPALIVE,<num> -> request GETMSGS if num>0
+static void handle_keepalive(Peer& p, const std::string& payload) {
+  size_t comma = payload.find(',');
+  int n = 0;
+  if (comma != std::string::npos) {
+    try {
+      n = std::stoi(payload.substr(comma+1));
+    } catch(...) {
+      n = 0;
+    }
+  }
+  if (n > 0) {
+    p.outq.push_back(p2p::frame(std::string("GETMSGS,") + MY_GROUP));
+  }
+}
+
+// GETMSGS,<GROUP> - respond by sending up to 20 messages held for that group
+static void handle_getmsgs_request(Peer& p, const std::string& payload) {
+  std::string who = trim(payload.substr(8)); // extract the group name
+  auto it = hold.find(who);
+  int sent = 0;
+  if (it != hold.end()) {
+    while (!it->second.empty() && sent < 20) {
+      std::string from = std::get<0>(it->second.front());
+      std::string body = std::get<1>(it->second.front());
+      it->second.pop_front();
+      std::string msg = "SENDMSG," + who + "," + from + "," + body;
+      p.outq.push_back(p2p::frame(msg));
+      ++sent;
+    }
+    if (it->second.empty()) hold.erase(it);
+  }
+}
+
+
 
 int main(int argc, char* argv[]) {
   if (argc != 2 && argc != 4) { std::cerr << "Usage: tsamgroup21 <port> [seed_host seed_port]\n"; return 1; }
@@ -489,9 +656,6 @@ int main(int argc, char* argv[]) {
       continue;
     }
     
-    // Debug: log poll events
-    logMessage(now() + " POLL: " + std::to_string(rc) + " events on " + std::to_string(pfds.size()) + " fds\n");
-
     // Periodic P2P housekeeping: KEEPALIVE + occasional STATUSREQ
     if (steady_clock::now() - last_keepalive >= std::chrono::seconds(60)) {
       sendKeepAlive(toggle_statusreq);
@@ -627,7 +791,13 @@ int main(int argc, char* argv[]) {
         // Find this pfd's poll entry
         size_t pidx = 0;
         bool found = false;
-        for (size_t k = 0; k < pfds.size(); ++k) { if (pfds[k].fd == pfd) { pidx = k; found = true; break; } }
+        for (size_t k = 0; k < pfds.size(); ++k) { // here we are looking for where in the pollfd array this peer fd is located
+          if (pfds[k].fd == pfd) {
+            pidx = k;
+            found = true;
+            break;
+          }
+        }
         if (!found) continue;
 
         auto pit = peers.find(pfd);
@@ -650,24 +820,17 @@ int main(int argc, char* argv[]) {
               perror("peer recv"); close(pfd); peers.erase(pit); goto next_peer;
             }
           }
-
-          // Parse all complete frames
           while (p2p::pop(p.inbuf, payload)) {
             logMessage(now() + " P2P-RX " + p.peer + " \"" + payload + "\"\n");
 
-            // Handle HELO: reply SERVERS with our public reachability and all connected peers
             if (payload.rfind("HELO,", 0) == 0) {
-              p.name = payload.substr(5); // remember their group name
-              
-              // Start with our own server info
+              // existing HELO handling remains unchanged (reply SERVERS, etc.)
+              p.name = payload.substr(5);
               std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
-              
-              // Add all connected peers that have identified themselves
               for (const auto& kv : peers) {
                 int peer_fd = kv.first;
                 const Peer& peer = kv.second;
-                if (peer_fd != pfd && !peer.name.empty()) { // Don't include the peer we're responding to, and only include named peers
-                  // Extract IP and port from peer.peer string (format: "ip:port")
+                if (peer_fd != pfd && !peer.name.empty()) {
                   size_t colon_pos = peer.peer.find(':');
                   if (colon_pos != std::string::npos) {
                     std::string peer_ip = peer.peer.substr(0, colon_pos);
@@ -676,164 +839,30 @@ int main(int argc, char* argv[]) {
                   }
                 }
               }
-              
               p.outq.push_back(p2p::frame(resp));
             }
-            // Auto-connect to peers advertised by others
             else if (payload.rfind("SERVERS,", 0) == 0) {
-              // CONTROLLED AUTO-CONNECT: Connect to new peers if we have room (up to 8 peers total)
-              if (peers.size() < 8) {
-                // payload: SERVERS,Name,IP,Port;Name,IP,Port;...
-                std::string list = payload.substr(8);
-                std::stringstream ss(list);
-                std::string entry;
-                int connected = 0;
-                // Allow more connections when we have fewer peers
-                int max_new_connections = peers.size() < 3 ? 2 : 1; // More aggressive when we have very few peers
-
-                auto is_ip = [](const std::string& s){
-                  in_addr tmp{};
-                  return inet_pton(AF_INET, s.c_str(), &tmp) == 1;
-                };
-
-                while (std::getline(ss, entry, ';') && connected < max_new_connections && peers.size() < 8) {
-                  if (entry.empty()) continue;
-
-                  // Tokenize robustly
-                  std::vector<std::string> tok;
-                  std::stringstream es(entry);
-                  std::string t;
-                  while (std::getline(es, t, ',')) if (!t.empty()) tok.push_back(t);
-
-                  if (tok.size() < 3) continue;
-
-                  std::string name = tok[0];
-                  std::string ip   = tok[1];
-                  std::string portstr = tok[2];
-
-                  // Validate IP
-                  if (!is_ip(ip)) continue;
-
-                  int prt = -1;
-                  try { prt = std::stoi(portstr); } catch (...) { prt = -1; }
-
-                  // Validate port range
-                  if (prt < 1024 || prt > 65535) continue;
-
-                  // Skip ourselves
-                  if (name == MY_GROUP) continue;
-
-                  // Dedup/limit
-                  std::string key = ip + ":" + std::to_string(prt);
-                  if (known_endpoints.count(key)) continue;
-
-                  int nfd = connectPeer(ip, prt);
-                  if (nfd >= 0) {
-                    ++connected;
-                    logMessage(now() + " CONTROLLED-AUTO-CONNECT to " + name + " (" + std::to_string(peers.size()) + "/8 peers)\n");
-                  }
-                }
-              } else {
-                logMessage(now() + " DEBUG: SERVERS received but we have max peers (" + std::to_string(peers.size()) + "/8)\n");
-              }
+              handle_servers_payload(p, payload);
             }
-            // Handle SENDMSG,<TO>,<FROM>,<Message...>
             else if (payload.rfind("SENDMSG,", 0) == 0) {
-              size_t c1 = payload.find(',', 8);
-              size_t c2 = (c1 == std::string::npos) ? std::string::npos : payload.find(',', c1 + 1);
-              if (c1 != std::string::npos && c2 != std::string::npos) {
-                std::string to   = trim(payload.substr(8, c1 - 8));
-                std::string from = trim(payload.substr(c1 + 1, c2 - (c1 + 1)));
-                std::string body = payload.substr(c2 + 1);
-                // Dedup first
-                std::string key = dedup_key(from, to, body);
-                if (!seen_msgs.insert(key).second) {
-                  logMessage(now() + std::string(" DUPLICATE SUPPRESSED P2P SENDMSG ") + from + "->" + to + "\n");
-                } else if (to == MY_GROUP) {
-                  inbox.push_back(body);
-                  logMessage(now() + " MSG-ENQUEUE from [" + from + "] -> [" + to + "]: " + body + "\n");
-                } else {
-                  // Hold for target and conservatively forward to other peers (simple flood)
-                  hold[to].push_back({from, body});
-                  for (auto& kvf : peers) {
-                    if (kvf.first == pfd) continue; // don't echo straight back to origin
-                    kvf.second.outq.push_back(p2p::frame(payload));
-                  }
-                  logMessage(now() + " RELAY-HOLD for [" + to + "] from [" + from + "]\n");
-                }
-              }
-              // no ACK required by spec
+              handle_p2p_sendmsg(pfd, p, payload);
             }
             else if (payload == "STATUSREQ") {
-              // Report what we are holding for others
-              std::string resp = "STATUSRESP";
-              for (auto& kv : hold) {
-                resp += "," + kv.first + "," + std::to_string(kv.second.size());
-              }
-              p.outq.push_back(p2p::frame(resp));
+              handle_statusreq(p);
             }
             else if (payload.rfind("STATUSRESP,", 0) == 0) {
-              // Handle status response: STATUSRESP,GROUP1,COUNT1,GROUP2,COUNT2,...
-              std::string data = payload.substr(11); // Skip "STATUSRESP,"
-              std::istringstream iss(data);
-              std::string token;
-              std::string group;
-              bool expecting_group = true;
-              
-              while (std::getline(iss, token, ',')) {
-                if (expecting_group) {
-                  group = token;
-                  expecting_group = false;
-                } else {
-                  try {
-                    int count = std::stoi(token);
-                    if (count > 0) {
-                      logMessage(now() + " STATUSRESP: peer " + p.peer + " holds " + std::to_string(count) + " messages for " + group + "\n");
-                      // If this peer has messages for our group, request them
-                      if (group == MY_GROUP) {
-                        p.outq.push_back(p2p::frame(std::string("GETMSGS,") + MY_GROUP));
-                        logMessage(now() + " REQUESTING messages for our group from peer " + p.peer + "\n");
-                      }
-                    }
-                  } catch (...) {
-                    // Invalid count, skip
-                  }
-                  expecting_group = true;
-                }
-              }
+              handle_statusresp(p, payload);
             }
             else if (payload.rfind("KEEPALIVE,", 0) == 0) {
-              // If peer says they have messages for us (>0), ask for them.
-              // Format: KEEPALIVE,<num>
-              size_t comma = payload.find(',');
-              int n = 0;
-              if (comma != std::string::npos) {
-                try { n = std::stoi(payload.substr(comma+1)); } catch(...) { n = 0; }
-              }
-              if (n > 0) {
-                // Request pending messages for our group
-                p.outq.push_back(p2p::frame(std::string("GETMSGS,") + MY_GROUP));
-              }
+              handle_keepalive(p, payload);
             }
             else if (payload.rfind("GETMSGS,", 0) == 0) {
-              // Peer is asking us to deliver messages we hold for them
-              std::string who = trim(payload.substr(8)); // extract the group name
-              auto it = hold.find(who);
-              int sent = 0;
-              if (it != hold.end()) {
-                while (!it->second.empty() && sent < 20) { // be nice; cap per tick
-                  std::string from = std::get<0>(it->second.front());
-                  std::string body = std::get<1>(it->second.front());
-                  it->second.pop_front();
-                  std::string msg = "SENDMSG," + who + "," + from + "," + body;
-                  p.outq.push_back(p2p::frame(msg));
-                  ++sent;
-                }
-                if (it->second.empty()) hold.erase(it);
-              }
+              handle_getmsgs_request(p, payload);
             }
-          } // end while (p2p::pop)
-        } // end if (POLLIN | POLLERR | POLLHUP)
+            // unknown payloads are simply ignored (or you can log)
+          }
+        }
+
 
         // Write any pending framed data
         if (pfds[pidx].revents & POLLOUT) {
