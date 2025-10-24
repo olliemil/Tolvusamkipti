@@ -70,6 +70,7 @@ std::chrono::steady_clock::time_point last_peer_nudge = steady_clock::now();
 
 // Forward declarations
 std::string serverForwardMsg(const std::string& to_group, const std::string& from_group, const std::string& text);
+int demoteInstructorServers();
 
 // Human-readable timestamp "YYYY-MM-DD HH:MM:SS" for logging
 static std::string now() {
@@ -356,7 +357,7 @@ int connectPeer(const std::string& host, int port) {
   Peer p; // we create a new Peer instance, should be named peer but that is already preoccupied
   p.fd  = sockfd;
   p.peer = std::string(ip) + ":" + std::to_string(port);
-  std::string resp = std::string("SERVERS,") + MY_GROUP + "," + PUB_IP + "," + std::to_string(port);
+  p.outq.push_back(p2p::frame(std::string("HELO,") + MY_GROUP));
   peers.insert({sockfd, std::move(p)}); // we add the new peer to our peers map
   logMessage(now() + " OUTBOUND " + host + ":" + std::to_string(port) + " (HELLO queued)\n");
 
@@ -384,13 +385,13 @@ bool isInstructorServer(const std::string& peer) {
 
 int demoteInstructorServers() {
   // if max servers reached, we drop connections to instructor servers first
-  if (peers.size() > MAX_PEERS) {
+  if (peers.size() >= MAX_PEERS) {
     for (auto it = peers.begin(); it != peers.end(); ) {
       if (isInstructorServer(it->second.peer)) {
-        logMessage(now() + " Demoted instructor servers");
+        std::string droppedPeer = it->second.peer;
         close(it->first);
         it = peers.erase(it);
-        logMessage(now() + " Demoted instructor server: " + it->second.peer);
+        logMessage(now() + " Demoted instructor server: " + droppedPeer + "\n");
         return 1; // dropped one
       } else {
         ++it;
@@ -814,10 +815,17 @@ int main(int argc, char* argv[]) {
               p.inbuf.append(buf, buf + n);
             } else if (n == 0) {
               logMessage(now() + " PEER-CLOSE " + p.peer + " fd=" + std::to_string(pfd) + "\n");
-              close(pfd); peers.erase(pit); goto next_peer;
+              close(pfd);
+              known_endpoints.erase(p.peer);
+              peers.erase(pit);
+              goto next_peer;
             } else {
               if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-              perror("peer recv"); close(pfd); peers.erase(pit); goto next_peer;
+              perror("peer recv");
+              close(pfd);
+              known_endpoints.erase(p.peer);
+              peers.erase(pit);
+              goto next_peer;
             }
           }
           while (p2p::pop(p.inbuf, payload)) {
@@ -871,7 +879,11 @@ int main(int argc, char* argv[]) {
             ssize_t n = send(pfd, b.data(), b.size(), 0);
             if (n < 0) {
               if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-              perror("peer send"); close(pfd); peers.erase(pit); goto next_peer;
+              perror("peer send");
+              close(pfd);
+              known_endpoints.erase(p.peer);
+              peers.erase(pit);
+              goto next_peer;
             }
             if ((size_t)n < b.size()) {
               p.outq.front() = b.substr(n); break;

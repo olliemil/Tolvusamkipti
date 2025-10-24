@@ -18,6 +18,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "helper.hpp"
 
 static std::string now() {
   using namespace std::chrono;
