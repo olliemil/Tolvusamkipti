@@ -114,6 +114,33 @@ static inline std::string trim(std::string s) {
   return s.substr(a, b - a);
 }
 
+// Escaping for line-based client protocol (so payloads stay on one line over TCP)
+static inline std::string escape_line(const std::string& s) {
+  std::string out; out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    if (c == '\\') { out += "\\\\"; }
+    else if (c == '\n') { out += "\\n"; }
+    else if (c == '\r') { out += "\\r"; }
+    else { out.push_back(c); }
+  }
+  return out;
+}
+static inline std::string unescape_line(const std::string& s) {
+  std::string out; out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    if (c == '\\' && i + 1 < s.size()) {
+      char n = s[i+1];
+      if (n == 'n') { out.push_back('\n'); ++i; continue; }
+      if (n == 'r') { out.push_back('\r'); ++i; continue; }
+      if (n == '\\') { out.push_back('\\'); ++i; continue; }
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
 // ---------- P2P (server-to-server) framing and peer state ----------
 
 namespace p2p {
@@ -252,6 +279,7 @@ void serverSendMsg(const std::string& line, Conn& c,
       std::string text = line.substr(p2 + 1);
       to = trim(to);
       text = trim(text);
+      text = unescape_line(text); // allow clients to send "\n" for newlines
 
       // Debug: show parsed fields
       logMessage(now() + " PARSED to=[" + to + "] text=[" + text + "]\n");
@@ -293,7 +321,7 @@ std::string serverGetMsg(const std::string& line) {
       it->second.pop_front();
       if (it->second.empty()) hold.erase(it);
       logMessage(now() + "GETMSGS: " + who + " " + from + " " + body + "\n");
-      return std::string("SENDMSG,") + who + "," + from + "," + body;
+      return std::string("SENDMSG,") + who + "," + from + "," + escape_line(body);
     } else {
       logMessage(now() + "GETMSGS: " + who + " EMPTY\n");
       return "EMPTY";
@@ -302,7 +330,7 @@ std::string serverGetMsg(const std::string& line) {
     if (!inbox.empty()) { 
       std::string msg = inbox.front(); 
       inbox.pop_front(); 
-      return std::string("MSG,") + msg; 
+      return std::string("MSG,") + escape_line(msg);
     } else {
       return "EMPTY";
     }
@@ -825,7 +853,9 @@ int main(int argc, char* argv[]) {
           // Kernel accepted only part of the buffer; keep the remainder in-place for next POLLOUT
           if ((size_t)n < front.size()) { c.outq.front() = front.substr(n); break; }
           else {
-            std::string log = front; if (!log.empty() && log.back() == '\n') log.pop_back();
+            std::string log = front;
+            if (!log.empty() && log.back() == '\n') log.pop_back();
+            for (char &ch : log) if (ch == '\n') ch = ' '; // keep logs single-line
             logMessage(now() + " TX " + c.peer + " \"" + log + "\"\n");
             c.outq.pop_front();
           }
