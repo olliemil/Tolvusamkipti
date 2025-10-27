@@ -46,6 +46,7 @@
         "unordered_map": "cpp",
         "variant": "cpp",
         "unordered_set": "cpp",
-        "list": "cpp"
+        "list": "cpp",
+        "functional": "cpp"
     }
 }

@@ -82,3 +82,12 @@ what is happening here?
 2025-10-25 13:04:40 P2P-TX 130.208.246.98:5002 "STATUSRESP,A5_62,1,A5_48,1,A5_66,1,A5_13,1,A5_8,2"
 2025-10-25 13:04:40 P2P-TX 130.208.246.98:5001 "SENDMSG,A5_40,Instr_2,What do you do if a message contains some weird characters and another message, such as GSENDMSG,Instr_2,A5_40,I don't know how to parse messages correctly?"
 2025-10-25 13:04:40 P2P-RX 130.208.246.98:5001 "STATUSREQ"
+
+
+
+
+erum ennþá stundum að advertise-a portið okkar sem -1
+
+"SERVERS,Instr_2,130.208.246.98,5002;A5_145,130.208.246.98,-1;Instr_1,130.208.246.98,5001;A5_1,130.208.246.98,4001;NUMBER,130.208.246.98,5004;ORACLE,130.208.246.98,5003;A5_21,130.208.246.98,-1;
+
+þurfum að græja það!

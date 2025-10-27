@@ -1,0 +1,168 @@
+Obtain 10 bonus points for the server delivering at least 10 messages to the correct recipient for which your group is neither sender nor receiver.
+Show logs proving your server relayed messages (SENDMSG in and out).
+
+1.
+2025-10-26 16:25:24 RELAY-HOLD for [A5_144] from [Instr_2]
+2025-10-26 16:25:24 P2P-TX 130.208.246.98:5001 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-TX 157.157.153.4:50926 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-TX 130.208.246.98:37824 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-TX 130.208.246.98:5004 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+
+
+2.
+SENDMSG,A5_52,Instr_2,What do you do if a message contains some weird characters and another message, such as GSENDMSG,Instr_2,A5_52,I don't know how to parse messages correctly?"
+2025-10-26 17:35:29 RELAY-HOLD for [A5_52] from [Instr_2]
+2025-10-26 17:35:29 P2P-TX 130.208.246.98:5004 "SENDMSG,A5_52,Instr_2,What do you do if a message contains some weird characters and another message, such as GSENDMSG,Instr_2,A5_52,I don't know how to parse messages correctly?"
+2025-10-26 17:35:29 P2P-RX 130.208.246.98:5002 "SENDMSG,A5_21,Instr_2,I guess you know that messages need to end with ETX () and start with SOH ()."
+2025-10-26 17:35:29 MSG-ENQUEUE from [Instr_2] -> [A5_21]: I guess you know that messages need to end with ETX () and start with SOH ().
+2025-10-26 17:35:29 P2P-TX 130.208.246.98:5003 "SENDMSG,A5_52,Instr_2,What do you do if a message contains some weird characters and another message, such as GSENDMSG,Instr_2,A5_52,I don't know how to parse messages correctly?"
+
+3.
+2025-10-26 18:19:48 P2P-RX 153.92.136.183 "HELO,A5_23"
+2025-10-26 18:19:48 IGNORE duplicate HELO from 153.92.136.183 (A5_23)
+2025-10-26 18:19:48 P2P-RX 153.92.136.183 "SENDMSG,A5_147,A5_23,Hello there, from group 23"
+2025-10-26 18:19:48 RELAY-HOLD for [A5_147] from [A5_23]
+2025-10-26 18:19:48 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_147,A5_23,Hello there, from group 23"
+2025-10-26 18:19:48 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_147,A5_23,Hello there, from group 23"
+2025-10-26 18:19:48 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_147,A5_23,Hello there, from group 23"
+2025-10-26 18:19:48 P2P-TX 46.182.188.192 "SENDMSG,A5_147,A5_23,Hello there, from group 23"
+
+4.
+2025-10-26 18:20:43 IGNORE duplicate HELO from 153.92.136.183 (A5_23)
+2025-10-26 18:20:43 P2P-RX 153.92.136.183 "SENDMSG,A5_29,A5_23,Hello there, from group 23"
+2025-10-26 18:20:43 RELAY-HOLD for [A5_29] from [A5_23]
+2025-10-26 18:20:43 P2P-TX 153.92.136.183 "STATUSRESP,A5_147,1,A5_4,1,A5_32,1,A5_33,1,A5_30,1,A5_11,1,A5_92,1,A5_13,1"
+2025-10-26 18:20:43 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_29,A5_23,Hello there, from group 23"
+2025-10-26 18:20:43 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_29,A5_23,Hello there, from group 23"
+2025-10-26 18:20:43 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_29,A5_23,Hello there, from group 23"
+
+5.
+2025-10-26 18:19:03 P2P-RX 153.92.136.183 "SENDMSG,A5_4,A5_23,Hello there, from group 23"
+2025-10-26 18:19:03 RELAY-HOLD for [A5_4] from [A5_23]
+2025-10-26 18:19:03 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_4,A5_23,Hello there, from group 23"
+2025-10-26 18:19:03 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_4,A5_23,Hello there, from group 23"
+2025-10-26 18:19:03 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_4,A5_23,Hello there, from group 23"
+2025-10-26 18:19:03 P2P-TX 46.182.188.192 "SENDMSG,A5_4,A5_23,Hello there, from group 23"
+
+6. 
+2025-10-26 18:25:35 IGNORE duplicate HELO from 153.92.136.183 (A5_23)
+2025-10-26 18:25:35 P2P-RX 153.92.136.183 "SENDMSG,A5_5,A5_23,Hello there, from group 23"
+2025-10-26 18:25:35 RELAY-HOLD for [A5_5] from [A5_23]
+2025-10-26 18:25:35 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_5,A5_23,Hello there, from group 23"
+2025-10-26 18:25:35 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_5,A5_23,Hello there, from group 23"
+2025-10-26 18:25:35 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_5,A5_23,Hello there, from group 23"
+2025-10-26 18:25:35 P2P-TX 46.182.188.192 "SENDMSG,A5_5,A5_23,Hello there, from group 23"
+
+7.
+2025-10-26 18:24:43 P2P-RX 153.92.136.183 "HELO,A5_23"
+2025-10-26 18:24:43 IGNORE duplicate HELO from 153.92.136.183 (A5_23)
+2025-10-26 18:24:43 P2P-RX 153.92.136.183 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+2025-10-26 18:24:43 RELAY-HOLD for [A5_65] from [A5_23]
+2025-10-26 18:24:43 P2P-RX 153.92.136.183 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+2025-10-26 18:24:43 DUPLICATE SUPPRESSED P2P SENDMSG A5_23->A5_65
+2025-10-26 18:24:43 P2P-TX 153.92.136.183 "STATUSRESP,A5_147,1,A5_4,1,A5_32,1,A5_33,1,A5_30,1,A5_11,1,A5_92,1,A5_13,1"
+2025-10-26 18:24:43 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+2025-10-26 18:24:43 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+2025-10-26 18:24:43 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+2025-10-26 18:24:43 P2P-TX 46.182.188.192 "SENDMSG,A5_65,A5_23,Hello there, from group 23"
+
+8. 
+2025-10-26 18:29:38 P2P-RX 153.92.136.183 "SENDMSG,A5_44,A5_23,Hello there, from group 23"
+2025-10-26 18:29:38 RELAY-HOLD for [A5_44] from [A5_23]
+2025-10-26 18:29:38 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_44,A5_23,Hello there, from group 23"
+2025-10-26 18:29:38 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_44,A5_23,Hello there, from group 23"
+2025-10-26 18:29:38 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_44,A5_23,Hello there, from group 23"
+2025-10-26 18:29:38 P2P-TX 46.182.188.192 "SENDMSG,A5_44,A5_23,Hello there, from group 23"
+
+9.
+2025-10-26 19:14:01 P2P-RX 130.208.246.98:5002 "SENDMSG,A5_42,Instr_2,Here is the ASCII table in case you need it:
+
+
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~��������������������������������������������������������������������������������������������������������������������������������"
+2025-10-26 19:14:01 RELAY-HOLD for [A5_42] from [Instr_2]
+2025-10-26 19:14:01 P2P-TX 130.208.246.98:4116 "SENDMSG,A5_42,Instr_2,Here is the ASCII table in case you need it:
+
+
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~��������������������������������������������������������������������������������������������������������������������������������"
+2025-10-26 19:14:01 P2P-TX 130.208.246.98:5004 "SENDMSG,A5_42,Instr_2,Here is the ASCII table in case you need it:
+
+
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~��������������������������������������������������������������������������������������������������������������������������������"
+2025-10-26 19:14:01 P2P-TX 130.208.246.98:5002 "STATUSRESP"
+2025-10-26 19:14:01 P2P-TX 130.208.246.98:5001 "SENDMSG,A5_42,Instr_2,Here is the ASCII table in case you need it:
+
+
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~��������������������������������������������������������������������������������������������������������������������������������"
+2025-10-26 19:14:01 P2P-TX 130.208.246.98:5003 "SENDMSG,A5_42,Instr_2,Here is the ASCII table in case you need it:
+
+
+ !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~��������������������������������������������������������������������������������������������������������������������������������"
+
+10.
+2025-10-26 20:54:19 P2P-RX 130.208.246.98:5003 "SENDMSG,A5_13,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 20:54:19 RELAY-HOLD for [A5_13] from [ORACLE]
+2025-10-26 20:54:19 P2P-RX 130.208.246.98:5003 "SENDMSG,A5_21,ORACLE,
+
+Blessent mon cœur d’une langueur monotone. "
+2025-10-26 20:54:19 MSG-ENQUEUE from [ORACLE] -> [A5_21]:
+
+Blessent mon cœur d’une langueur monotone.
+2025-10-26 20:54:19 P2P-TX 130.208.246.98:40906 "SENDMSG,A5_13,ORACLE,
+
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 20:54:19 P2P-TX 130.208.246.98:40892 "SENDMSG,A5_13,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 20:54:19 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_13,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 20:54:19 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_13,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 20:54:19 P2P-TX 46.182.188.192:52694 "SENDMSG,A5_13,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+
+11. 
+2025-10-26 21:06:23 P2P-RX 130.208.246.98:5003 "SENDMSG,A5_133,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 21:06:23 RELAY-HOLD for [A5_133] from [ORACLE]
+2025-10-26 21:06:23 P2P-TX 130.208.246.98:40906 "SENDMSG,A5_133,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 21:06:23 P2P-TX 130.208.246.98:40892 "SENDMSG,A5_133,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 21:06:23 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_133,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "
+2025-10-26 21:06:23 P2P-TX 130.208.246.98:4060 "SENDMSG,A5_133,ORACLE,
+
+“The most likely way for the world to be destroyed, most experts agree, is by accident.
+That’s where we come in: we’re computer professionals. We cause accidents.”
+– Nathaniel Borenstein "

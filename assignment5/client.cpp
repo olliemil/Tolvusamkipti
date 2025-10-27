@@ -30,7 +30,6 @@ static std::string now() {
 
 int main(int argc, char* argv[]) {
 
-  // Mode 2: full manual command mode
   if (argc < 4) {
     std::cerr << "Usage:\n"
               << "  ./client <target-group> <message>\n"

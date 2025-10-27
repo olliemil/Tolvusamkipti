@@ -1,0 +1,125 @@
+Obtain 10 points per 10 different groups you can show messages (not commands!) received from, up to 20 points.
+Show relevant parts of your timestamped log where your client receives messages (SENDMSG).
+
+
+
+2025-10-26 16:25:24 P2P-RX 130.208.246.98:5002 "SENDMSG,A5_144,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-RX 130.208.246.98:5002 "SENDMSG,A5_21,Instr_2,I guess you know that messages need to start with SOH () and end with ETX ()."
+2025-10-26 16:25:24 P2P-RX 130.208.246.98:5004 "SENDMSG,A5_21,NUMBER,
+fef2576d54dbde017a3a8e4df699ef6d"
+2025-10-26 16:20:19 P2P-TX 130.208.246.98:4003 "SENDMSG,A5_23,Instr_2,What do you do if a message contains some weird characters and another message, such as GSENDMSG,Instr_2,A5_23,I don't know how to parse messages correctly?"
+2025-10-26 16:21:27 P2P-TX (GETMSGS reply) 130.208.246.98:39828 "SENDMSG,A5_70,Instr_2,Sorry about this really looooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong message!"
+
+1. A5_52
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 17:22:49 TX "GETMSG"
+2025-10-26 17:22:49 RX "MSG,Hello from group 52!"
+server.log:
+2025-10-26 17:22:25 P2P-RX 130.208.246.98:4052 "SENDMSG,A5_21,A5_52,Hello from group 52!"
+2025-10-26 17:22:25 MSG-ENQUEUE from [A5_52] -> [A5_21]: Hello from group 52!
+
+
+2. NUMBER
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 17:08:45 TX "GETMSG"
+2025-10-26 17:08:45 RX "MSG,e374307dc474b38fb89368677fbabfda"
+
+server.log:
+2025-10-26 16:25:24 P2P-RX 130.208.246.98:5004 "SENDMSG,A5_21,NUMBER,
+fef2576d54dbde017a3a8e4df699ef6d"
+
+
+3. ORACLE
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 17:25:12 TX "GETMSG"
+2025-10-26 17:25:12 RX "MSG,
+
+The Internet Oracle has pondered your question deeply. Your question was:
+  Did you say, "Watch the sheeps," or "Wash the sheets"? How can I know
+  which is which?
+And in response, thus spake the Oracle:
+  The sheep are the ones that object when you try to make them fit into
+  the washing machine. "
+
+server.log: 
+2025-10-26 17:23:01 P2P-RX 130.208.246.98:5003 "SENDMSG,A5_21,ORACLE,
+
+The Internet Oracle has pondered your question deeply. Your question was:
+  Did you say, "Watch the sheeps," or "Wash the sheets"? How can I know
+  which is which?
+And in response, thus spake the Oracle:
+  The sheep are the ones that object when you try to make them fit into
+  the washing machine. "
+
+
+4. Instr_2:
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 18:14:59 TX "GETMSG"
+2025-10-26 18:14:59 RX "MSG,I guess you know that messages need to end with ETX () and start with SOH ().A5_29,Instr_1"
+
+server.log:
+
+
+5. A5_23:
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 18:25:29 TX "GETMSG"
+2025-10-26 18:25:29 RX "MSG,Hello there, from group 23"
+
+server.log: 
+2025-10-26 18:25:29 RX 130.208.246.98:53074 "GETMSG"
+2025-10-26 18:25:29 TX 130.208.246.98:53074 "MSG,Hello there, from group 23"
+
+6. A5_70:
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 18:28:56 TX "GETMSG"
+2025-10-26 18:28:56 RX "MSG,yoyoyo"
+
+server.log: 
+2025-10-26 18:27:43 P2P-RX 153.92.136.183 "SENDMSG,A5_21,A5_70,yoyoyo"
+2025-10-26 18:27:43 MSG-ENQUEUE from [A5_70] -> [A5_21]: yoyoyo
+
+7. A5_17:
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 19:07:32 TX "GETMSG"
+2025-10-26 19:07:32 RX "MSG,HELLO? ANYONE THERE??"
+
+server.log:
+2025-10-26 19:06:50 P2P-RX 130.208.246.98:37944 "SENDMSG,A5_21,A5_17,HELLO? ANYONE THERE??"
+2025-10-26 19:06:50 MSG-ENQUEUE from [A5_17] -> [A5_21]: HELLO? ANYONE THERE??
+
+8. A5_60:
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 20:23:40 TX "GETMSG"
+2025-10-26 20:23:40 RX "MSG,Hello from A5_60 automated!"
+
+server.log:
+2025-10-26 20:23:40 RX 130.208.246.98:34874 "GETMSG"
+2025-10-26 20:23:40 TX 130.208.246.98:34874 "MSG,Hello from A5_60 automated!"
+
+9. A5_101
+client:
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 20:45:11 TX "GETMSG"
+2025-10-26 20:45:11 RX "MSG,Hey yooooo?"
+
+server.log:
+2025-10-26 20:44:58 P2P-RX 130.208.246.98:4101 "SENDMSG,A5_21,A5_101,Hey yooooo?"
+2025-10-26 20:44:58 MSG-ENQUEUE from [A5_101] -> [A5_21]: Hey A5_21,Hey yooooo?
+
+10. A5_29
+sindrib23@tsam:~/assignment5/try$ ./client 130.208.246.98 4021 GETMSG
+2025-10-26 21:03:27 TX "GETMSG"
+2025-10-26 21:03:27 RX "MSG,warrup"
+
+2025-10-26 21:02:59 P2P-RX 130.208.246.98:41232 "SENDMSG,A5_21,A5_29,warrup"
+2025-10-26 21:02:59 MSG-ENQUEUE from [A5_29] -> [A5_21]: warrup
+
+
