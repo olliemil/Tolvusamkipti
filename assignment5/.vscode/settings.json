@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "map": "cpp",
+        "optional": "cpp",
+        "queue": "cpp",
+        "stack": "cpp",
+        "unordered_map": "cpp",
+        "variant": "cpp"
+    }
+}
